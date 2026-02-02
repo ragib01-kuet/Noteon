@@ -1,0 +1,7 @@
+{
+  "name": "NOTEON - Notes that Think",
+  "description": "A professional handwritten note-taking app with built-in AI for solving Math, Physics, and Chemistry problems directly from your sketches.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
