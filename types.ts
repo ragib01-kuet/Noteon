@@ -1,5 +1,5 @@
 
-export type ToolType = 'pen' | 'pencil' | 'highlighter' | 'eraser' | 'select' | 'lasso';
+export type ToolType = 'pen' | 'pencil' | 'highlighter' | 'eraser' | 'select' | 'lasso' | 'image';
 
 export interface Point {
   x: number;
@@ -23,16 +23,34 @@ export interface TextElement {
   y: number; // 0-100
   color: string;
   fontSize: number;
-  width?: number; // Estimated for selection
+  width?: number;
   height?: number;
+}
+
+export interface ImageElement {
+  id: string;
+  dataUrl: string;
+  x: number; // 0-100
+  y: number; // 0-100
+  width: number; // 0-100 (percentage of canvas width)
+  height: number; // 0-100 (percentage of canvas height)
 }
 
 export interface Page {
   id: string;
   strokes: Stroke[];
   textElements: TextElement[];
+  imageElements: ImageElement[];
   template: 'blank' | 'ruled' | 'grid';
+}
+
+export interface Notebook {
+  id: string;
   title: string;
+  coverColor: string;
+  template: 'blank' | 'ruled' | 'grid';
+  pages: Page[];
+  lastModified: number;
   tags: string[];
 }
 

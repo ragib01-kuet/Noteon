@@ -4,17 +4,65 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>NOTEON - Notes that Think</title>
+    <title>NOTEON - Intellectual Ink</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Kalam:wght@300;400;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Kalam:wght@300;400;700&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
     <style>
+      :root {
+        --paper-bg: #fcfcfc;
+        --indigo-primary: #4f46e5;
+      }
       body {
         font-family: 'Inter', sans-serif;
         background-color: #f8fafc;
         overflow: hidden;
+        color: #1e293b;
       }
       .handwritten {
         font-family: 'Kalam', cursive;
+      }
+      .math-font {
+        font-family: 'JetBrains Mono', monospace;
+      }
+      .paper-texture {
+        background-color: var(--paper-bg);
+        position: relative;
+      }
+      .paper-texture::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+        background-image: 
+          radial-gradient(#e2e8f0 1px, transparent 1px);
+        background-size: 24px 24px;
+        opacity: 0.5;
+      }
+      .custom-scrollbar::-webkit-scrollbar {
+        width: 6px;
+      }
+      .custom-scrollbar::-webkit-scrollbar-track {
+        background: transparent;
+      }
+      .custom-scrollbar::-webkit-scrollbar-thumb {
+        background: #cbd5e1;
+        border-radius: 10px;
+      }
+      .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+        background: #94a3b8;
+      }
+      @keyframes float {
+        0% { transform: translateY(0px); }
+        50% { transform: translateY(-8px); }
+        100% { transform: translateY(0px); }
+      }
+      .animate-float {
+        animation: float 4s ease-in-out infinite;
+      }
+      .glass-card {
+        background: rgba(255, 255, 255, 0.8);
+        backdrop-filter: blur(12px);
+        border: 1px solid rgba(255, 255, 255, 0.3);
       }
     </style>
   <script type="importmap">
