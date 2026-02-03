@@ -2,6 +2,7 @@
 import React, { useRef, useEffect, useState, useImperativeHandle, forwardRef, useMemo } from 'react';
 import { Stroke, Point, ToolType, BrushType, TextElement, ImageElement } from '../types';
 import { detectShapeGeometric, hitTestResizeHandles, getResizeHandleRects, resizeStrokePoints, getBoundingBox as calcBoundingBox, isPointInPolygon, BoundingBox, ResizeHandleType } from '../services/geometryService';
+import { renderPDFPageToCanvas } from '../services/pdfService';
 
 interface DrawingCanvasProps {
   currentTool: ToolType;
@@ -17,6 +18,8 @@ interface DrawingCanvasProps {
   template: 'blank' | 'ruled' | 'grid';
   zoomScale?: number;
   smartShapesEnabled?: boolean;
+  pdfId?: string;
+  pdfPageIndex?: number;
 }
 
 export interface CanvasHandle {
@@ -66,9 +69,13 @@ const drawTexturedPath = (ctx: CanvasRenderingContext2D, points: Point[], color:
 };
 
 const DrawingCanvas = forwardRef<CanvasHandle, DrawingCanvasProps>(({ 
-  currentTool, brushType, color, strokeSize, strokes, textElements, imageElements, autopilotResult, setStrokes, template, zoomScale = 1.0, smartShapesEnabled = false, backgroundUrl
+  currentTool, brushType, color, strokeSize, strokes, textElements, imageElements, autopilotResult, setStrokes, template, zoomScale = 1.0, smartShapesEnabled = false, backgroundUrl, pdfId, pdfPageIndex
 }, ref) => {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
+  // We use TWO canvases now. One for the static background (PDF/Image) and one for active Ink.
+  // This prevents redrawing the heavy PDF on every mouse move.
+  const bgCanvasRef = useRef<HTMLCanvasElement>(null);
+  const inkCanvasRef = useRef<HTMLCanvasElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
   
   // Interaction State
   const [interactionMode, setInteractionMode] = useState<InteractionMode>('none');
@@ -96,16 +103,31 @@ const DrawingCanvas = forwardRef<CanvasHandle, DrawingCanvasProps>(({
 
   useImperativeHandle(ref, () => ({
     getCanvasImage: () => {
-      if (!canvasRef.current) return '';
+      // Composition for export
+      const inkCanvas = inkCanvasRef.current;
+      const bgCanvas = bgCanvasRef.current;
+      if (!inkCanvas || !bgCanvas) return '';
+
       const temp = document.createElement('canvas');
       temp.width = LOGICAL_WIDTH * dpr; temp.height = LOGICAL_HEIGHT * dpr;
       const tCtx = temp.getContext('2d');
-      if (tCtx) { tCtx.scale(dpr, dpr); tCtx.fillStyle = '#ffffff'; tCtx.fillRect(0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT); tCtx.drawImage(canvasRef.current, 0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT); }
+      if (tCtx) { 
+        // 1. Draw Background
+        tCtx.fillStyle = '#ffffff'; 
+        tCtx.fillRect(0, 0, temp.width, temp.height);
+        
+        // 2. Draw PDF/Template layer (scaled to fit)
+        tCtx.drawImage(bgCanvas, 0, 0, temp.width, temp.height);
+        
+        // 3. Draw Ink layer
+        tCtx.drawImage(inkCanvas, 0, 0, temp.width, temp.height);
+      }
       return temp.toDataURL('image/png');
     },
     clear: () => setStrokes({ strokes: [], textElements: [], imageElements: [] })
   }));
 
+  // --- Background Loading (PDF or Image) ---
   useEffect(() => {
     if (backgroundUrl) {
       const img = new Image();
@@ -116,6 +138,50 @@ const DrawingCanvas = forwardRef<CanvasHandle, DrawingCanvasProps>(({
       setBackgroundImage(null);
     }
   }, [backgroundUrl]);
+
+  // --- Background Rendering (Layer 0) ---
+  useEffect(() => {
+    const canvas = bgCanvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    // Set resolution
+    if (canvas.width !== LOGICAL_WIDTH * dpr || canvas.height !== LOGICAL_HEIGHT * dpr) {
+      canvas.width = LOGICAL_WIDTH * dpr;
+      canvas.height = LOGICAL_HEIGHT * dpr;
+    }
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.save();
+    
+    // If PDF, render page
+    if (pdfId && pdfPageIndex) {
+      // renderPDFPageToCanvas handles its own context scaling logic internally for quality,
+      // but we need to ensure it draws into OUR buffer.
+      renderPDFPageToCanvas(pdfId, pdfPageIndex, canvas, zoomScale).then(() => {
+        // PDF Render complete
+      });
+    } 
+    // If Image
+    else if (backgroundImage) {
+      ctx.scale(dpr, dpr);
+      ctx.drawImage(backgroundImage, 0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT);
+      ctx.restore();
+    } 
+    // If Template
+    else {
+      ctx.scale(dpr, dpr);
+      if (template !== 'blank') {
+        ctx.strokeStyle = template === 'ruled' ? '#e2e8f0' : '#f1f5f9'; ctx.lineWidth = 1;
+        const step = 40;
+        for (let x = 0; x < LOGICAL_WIDTH; x += step) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, LOGICAL_HEIGHT); ctx.stroke(); }
+        for (let y = 0; y < LOGICAL_HEIGHT; y += step) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(LOGICAL_WIDTH, y); ctx.stroke(); }
+      }
+      ctx.restore();
+    }
+    
+  }, [pdfId, pdfPageIndex, backgroundImage, template, zoomScale, dpr]);
 
   // Derived state for rendering: Use tempStrokes if dragging, otherwise props.strokes
   const activeStrokes = useMemo(() => tempStrokes || strokes, [tempStrokes, strokes]);
@@ -129,14 +195,13 @@ const DrawingCanvas = forwardRef<CanvasHandle, DrawingCanvasProps>(({
     return calcBoundingBox(selectedPoints);
   }, [selectedElementIds, activeStrokes]);
 
-  // -- Render --
-  const render = () => {
-    const canvas = canvasRef.current;
+  // --- Ink Rendering (Layer 1) ---
+  const renderInk = () => {
+    const canvas = inkCanvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    // CRITICAL: Ensure the canvas internal resolution matches the display
     if (canvas.width !== LOGICAL_WIDTH * dpr || canvas.height !== LOGICAL_HEIGHT * dpr) {
       canvas.width = LOGICAL_WIDTH * dpr;
       canvas.height = LOGICAL_HEIGHT * dpr;
@@ -145,14 +210,6 @@ const DrawingCanvas = forwardRef<CanvasHandle, DrawingCanvasProps>(({
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.save(); 
     ctx.scale(dpr, dpr);
-
-    if (backgroundImage) ctx.drawImage(backgroundImage, 0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT);
-    else if (template !== 'blank') {
-      ctx.strokeStyle = template === 'ruled' ? '#e2e8f0' : '#f1f5f9'; ctx.lineWidth = 1;
-      const step = 40;
-      for (let x = 0; x < LOGICAL_WIDTH; x += step) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, LOGICAL_HEIGHT); ctx.stroke(); }
-      for (let y = 0; y < LOGICAL_HEIGHT; y += step) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(LOGICAL_WIDTH, y); ctx.stroke(); }
-    }
 
     activeStrokes.forEach(s => {
       ctx.save();
@@ -205,12 +262,14 @@ const DrawingCanvas = forwardRef<CanvasHandle, DrawingCanvasProps>(({
     ctx.restore();
   };
 
-  useEffect(() => { render(); }, [activeStrokes, currentStroke, lassoPolygon, selectedElementIds, template, activeResizeHandle, backgroundImage]);
+  useEffect(() => { renderInk(); }, [activeStrokes, currentStroke, lassoPolygon, selectedElementIds, activeResizeHandle]);
 
   // -- Event Logic --
 
   const getCoords = (e: React.PointerEvent) => {
-    const rect = canvasRef.current!.getBoundingClientRect();
+    // We attach events to the container div or the top canvas.
+    // Use inkCanvasRef for boundingRect
+    const rect = inkCanvasRef.current!.getBoundingClientRect();
     return { 
       x: (e.clientX - rect.left) * (LOGICAL_WIDTH / rect.width), 
       y: (e.clientY - rect.top) * (LOGICAL_HEIGHT / rect.height) 
@@ -218,22 +277,23 @@ const DrawingCanvas = forwardRef<CanvasHandle, DrawingCanvasProps>(({
   };
 
   const updateCursor = (p: Point) => {
+    if (!inkCanvasRef.current) return;
     if (currentTool === 'select' && selectionRect) {
       const handle = hitTestResizeHandles(p, selectionRect, zoomScale);
-      if (handle === 'nw' || handle === 'se') canvasRef.current!.style.cursor = 'nwse-resize';
-      else if (handle === 'ne' || handle === 'sw') canvasRef.current!.style.cursor = 'nesw-resize';
+      if (handle === 'nw' || handle === 'se') inkCanvasRef.current.style.cursor = 'nwse-resize';
+      else if (handle === 'ne' || handle === 'sw') inkCanvasRef.current.style.cursor = 'nesw-resize';
       else if (
          p.x >= selectionRect.minX && p.x <= selectionRect.maxX && 
          p.y >= selectionRect.minY && p.y <= selectionRect.maxY
       ) {
-        canvasRef.current!.style.cursor = 'move';
+        inkCanvasRef.current.style.cursor = 'move';
       } else {
-        canvasRef.current!.style.cursor = 'default';
+        inkCanvasRef.current.style.cursor = 'default';
       }
     } else if (currentTool === 'lasso') {
-      canvasRef.current!.style.cursor = 'crosshair';
+      inkCanvasRef.current.style.cursor = 'crosshair';
     } else {
-      canvasRef.current!.style.cursor = 'crosshair';
+      inkCanvasRef.current.style.cursor = 'crosshair';
     }
   };
 
@@ -439,15 +499,26 @@ const DrawingCanvas = forwardRef<CanvasHandle, DrawingCanvasProps>(({
     setCurrentStroke([]);
   };
 
-  return <canvas 
-    ref={canvasRef} 
-    className="w-full h-full block touch-none"
-    style={{ touchAction: 'none' }}
-    onPointerDown={onDown} 
-    onPointerMove={onMove} 
-    onPointerUp={onUp} 
-    onPointerLeave={onUp}
-  />;
+  return (
+    <div ref={containerRef} className="relative w-full h-full block touch-none">
+       {/* Layer 0: Background / PDF (Passive) */}
+       <canvas 
+          ref={bgCanvasRef}
+          className="absolute inset-0 w-full h-full"
+          style={{ pointerEvents: 'none', zIndex: 0 }}
+       />
+       {/* Layer 1: Ink / Interactions (Active) */}
+       <canvas 
+          ref={inkCanvasRef}
+          className="absolute inset-0 w-full h-full"
+          style={{ touchAction: 'none', zIndex: 1 }}
+          onPointerDown={onDown} 
+          onPointerMove={onMove} 
+          onPointerUp={onUp} 
+          onPointerLeave={onUp}
+       />
+    </div>
+  );
 });
 
 export default DrawingCanvas;

@@ -2,6 +2,18 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import { AIResponse, DiagramResponse, SmartShapeResponse, Point } from "../types";
 
+// Safe access to API Key to prevent ReferenceError in browsers
+const getApiKey = () => {
+  try {
+    if (typeof process !== 'undefined' && process.env) {
+      return process.env.API_KEY;
+    }
+  } catch (e) {
+    // Ignore reference errors
+  }
+  return '';
+};
+
 /**
  * Simplifies points to reduce token usage and noise.
  */
@@ -60,7 +72,12 @@ const normalizeStrokeGroup = (strokeGroup: Point[][]) => {
  * Accepts an array of strokes (Point[][]) to allow multi-stroke shape detection.
  */
 export const autoCorrectShapeAI = async (strokeGroup: Point[][]): Promise<SmartShapeResponse> => {
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  const apiKey = getApiKey();
+  if (!apiKey) {
+    console.warn("API Key missing for Shape AI");
+    return { shapes: [] };
+  }
+  const ai = new GoogleGenAI({ apiKey });
   
   // 1. Simplify all strokes first
   const simplifiedGroup = strokeGroup.map(s => simplifyPoints(s, 2.0));
@@ -161,7 +178,9 @@ export const autoCorrectShapeAI = async (strokeGroup: Point[][]): Promise<SmartS
 };
 
 export const solveHandwriting = async (base64Image: string, isAutopilot: boolean = false): Promise<AIResponse> => {
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  const apiKey = getApiKey();
+  if (!apiKey) throw new Error("API Key missing");
+  const ai = new GoogleGenAI({ apiKey });
   const model = isAutopilot ? 'gemini-3-flash-preview' : 'gemini-3-pro-preview';
   try {
     const response = await ai.models.generateContent({
@@ -174,7 +193,9 @@ export const solveHandwriting = async (base64Image: string, isAutopilot: boolean
 };
 
 export const cleanPhysicsDiagram = async (base64Image: string): Promise<DiagramResponse> => {
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  const apiKey = getApiKey();
+  if (!apiKey) throw new Error("API Key missing");
+  const ai = new GoogleGenAI({ apiKey });
   try {
     const response = await ai.models.generateContent({
       model: 'gemini-3-pro-preview',

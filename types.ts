@@ -47,6 +47,8 @@ export interface Page {
   imageElements: ImageElement[];
   template: 'blank' | 'ruled' | 'grid';
   backgroundUrl?: string; 
+  pdfId?: string;       // Reference to the loaded PDF document in memory
+  pdfPageIndex?: number; // 1-based index for PDF.js
 }
 
 export interface Notebook {
@@ -57,6 +59,7 @@ export interface Notebook {
   pages: Page[];
   lastModified: number;
   tags: string[];
+  pdfDataId?: string; // ID of the PDF file associated with this notebook
 }
 
 export interface AIResponse {

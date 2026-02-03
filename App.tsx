@@ -22,7 +22,7 @@ import AIResultPanel from './components/AIResultPanel';
 import Dashboard from './components/Dashboard';
 import NewNotebookModal from './components/NewNotebookModal';
 import { solveHandwriting, cleanPhysicsDiagram } from './services/geminiService';
-import { convertPDFToImages } from './services/pdfService';
+import { loadPDFDocument } from './services/pdfService';
 import { Page, ToolType, BrushType, AIResponse, Notebook, ImageElement, Stroke, TextElement } from './types';
 
 const NavBtn = ({ active, icon, label, onClick }: { active?: boolean, icon: React.ReactNode, label: string, onClick?: () => void }) => (
@@ -180,22 +180,28 @@ const App: React.FC = () => {
   const handleImportPDF = async (file: File) => {
     setIsProcessingPDF(true);
     try {
-      const images = await convertPDFToImages(file);
+      // Load PDF into memory cache via service
+      const { pdfId, numPages, title } = await loadPDFDocument(file);
+      
       const newId = `${Date.now()}`;
       
-      const newPages: Page[] = images.map((img, index) => ({
-        id: `p-${newId}-${index}`,
-        strokes: [],
-        textElements: [],
-        imageElements: [],
-        template: 'blank', // PDF is the background
-        backgroundUrl: img.dataUrl
-      }));
+      const newPages: Page[] = [];
+      for (let i = 1; i <= numPages; i++) {
+        newPages.push({
+          id: `p-${newId}-${i}`,
+          strokes: [],
+          textElements: [],
+          imageElements: [],
+          template: 'blank', 
+          pdfId: pdfId,
+          pdfPageIndex: i
+        });
+      }
 
       const newNotebook: Notebook = {
         id: newId,
-        title: file.name.replace('.pdf', ''),
-        coverColor: '#ef4444', // Default Red for PDF
+        title: title || 'Imported PDF',
+        coverColor: '#ef4444', 
         template: 'blank',
         pages: newPages,
         lastModified: Date.now(),
@@ -221,7 +227,7 @@ const App: React.FC = () => {
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-white/80 backdrop-blur-sm">
           <div className="flex flex-col items-center gap-4">
             <Loader2 size={48} className="text-indigo-600 animate-spin" />
-            <span className="text-sm font-black text-indigo-700 uppercase tracking-widest">Importing PDF Document...</span>
+            <span className="text-sm font-black text-indigo-700 uppercase tracking-widest">Parsing PDF Document...</span>
           </div>
         </div>
       )}
@@ -248,7 +254,7 @@ const App: React.FC = () => {
             <div className="aspect-[3/4] bg-slate-200 rounded-[18px] overflow-hidden relative shadow-inner">
                <div className="w-full h-full flex items-center justify-center text-slate-300">
                   {/* If Page has background (PDF), show preview? For now simple icon */}
-                  <FileText size={32} />
+                  {page.pdfId ? <span className="text-xs font-bold text-slate-400">PDF {page.pdfPageIndex}</span> : <FileText size={32} />}
                </div>
                {page.backgroundUrl && <div className="absolute inset-0 bg-cover bg-center opacity-50" style={{ backgroundImage: `url(${page.backgroundUrl})` }} />}
             </div>
@@ -275,11 +281,11 @@ const App: React.FC = () => {
             minWidth: `${850 * zoomScale}px`,
             maxWidth: `${850 * zoomScale}px`
           }}>
-            {currentPage ? <DrawingCanvas ref={canvasRef} currentTool={currentTool} brushType={toolSettings[currentTool].brushType} color={toolSettings[currentTool].color} strokeSize={toolSettings[currentTool].strokeSize} strokes={currentPage.strokes} textElements={currentPage.textElements} imageElements={currentPage.imageElements || []} autopilotResult={autopilotResult} setStrokes={(data) => updatePage(data)} template={currentPage.template || activeNotebook?.template || 'grid'} zoomScale={zoomScale} smartShapesEnabled={isSmartShapesActive} backgroundUrl={currentPage.backgroundUrl} /> : <div className="w-full h-full flex items-center justify-center bg-slate-50"><Sparkles className="text-slate-200" size={64} /></div>}
+            {currentPage ? <DrawingCanvas ref={canvasRef} currentTool={currentTool} brushType={toolSettings[currentTool].brushType} color={toolSettings[currentTool].color} strokeSize={toolSettings[currentTool].strokeSize} strokes={currentPage.strokes} textElements={currentPage.textElements} imageElements={currentPage.imageElements || []} autopilotResult={autopilotResult} setStrokes={(data) => updatePage(data)} template={currentPage.template || activeNotebook?.template || 'grid'} zoomScale={zoomScale} smartShapesEnabled={isSmartShapesActive} backgroundUrl={currentPage.backgroundUrl} pdfId={currentPage.pdfId} pdfPageIndex={currentPage.pdfPageIndex} /> : <div className="w-full h-full flex items-center justify-center bg-slate-50"><Sparkles className="text-slate-200" size={64} /></div>}
           </div>
           <AIResultPanel result={aiResult} onClose={() => setAiResult(null)} />
         </div>
-        <Toolbar currentTool={currentTool} setCurrentTool={setCurrentTool} toolSettings={toolSettings} updateToolSettings={updateToolSettings} onClear={() => canvasRef.current?.clear()} onSolve={handleSolve} onCleanDiagram={handleCleanDiagram} onExport={() => { const link = document.createElement('a'); link.download = `markup-${Date.now()}.png`; link.href = canvasRef.current?.getCanvasImage() || ''; link.click(); }} onInsertImage={() => {}} isSolving={isSolving || isCleaning} isSmartShapesActive={isSmartShapesActive} setIsSmartShapesActive={setIsSmartShapesActive} />
+        <Toolbar currentTool={currentTool} setCurrentTool={setCurrentTool} toolSettings={toolSettings} updateToolSettings={updateToolSettings} onClear={() => canvasRef.current?.clear()} onSolve={handleSolve} onCleanDiagram={handleCleanDiagram} onExport={() => { const link = document.createElement('a'); link.download = `markup-${Date.now()}.png`; link.href = canvasRef.current?.getCanvasImage() || ''; link.click(); }} isSolving={isSolving || isCleaning} isSmartShapesActive={isSmartShapesActive} setIsSmartShapesActive={setIsSmartShapesActive} />
       </main>
     </div>
   );
