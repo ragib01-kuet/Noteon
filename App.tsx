@@ -14,13 +14,17 @@ import {
   ZoomOut,
   Loader2,
   Undo2,
-  Redo2
+  Redo2,
+  Plus,
+  BookOpen
 } from 'lucide-react';
 import DrawingCanvas, { CanvasHandle } from './components/DrawingCanvas';
 import Toolbar from './components/Toolbar';
 import AIResultPanel from './components/AIResultPanel';
 import Dashboard from './components/Dashboard';
 import NewNotebookModal from './components/NewNotebookModal';
+import SettingsModal from './components/SettingsModal';
+import PageThumbnail from './components/PageThumbnail';
 import { solveHandwriting, cleanPhysicsDiagram } from './services/geminiService';
 import { loadPDFDocument } from './services/pdfService';
 import { Page, ToolType, BrushType, AIResponse, Notebook, ImageElement, Stroke, TextElement } from './types';
@@ -49,27 +53,36 @@ interface PageState {
 
 const App: React.FC = () => {
   const [view, setView] = useState<'dashboard' | 'editor'>('dashboard');
+  const [dashboardView, setDashboardView] = useState<'all' | 'recent' | 'pinned'>('all');
+  
   const [notebooks, setNotebooks] = useState<Notebook[]>(() => {
     try {
       const saved = localStorage.getItem('noteon_notebooks');
       if (!saved) return [];
       const parsed = JSON.parse(saved);
+      if (!Array.isArray(parsed)) return [];
+      
       return parsed.map((n: any) => ({
         ...n,
         id: n.id || `${Date.now()}-${Math.random()}`,
-        pages: (n.pages || []).map((p: any) => ({
+        pages: (Array.isArray(n.pages) ? n.pages : []).map((p: any) => ({
           ...p,
-          strokes: p.strokes || [],
-          textElements: p.textElements || [],
-          imageElements: p.imageElements || [],
+          strokes: Array.isArray(p.strokes) ? p.strokes : [],
+          textElements: Array.isArray(p.textElements) ? p.textElements : [],
+          imageElements: Array.isArray(p.imageElements) ? p.imageElements : [],
         }))
       })) as Notebook[];
-    } catch (e) { return []; }
+    } catch (e) { 
+      console.warn("Failed to load notebooks", e);
+      return []; 
+    }
   });
   
   const [activeNotebookId, setActiveNotebookId] = useState<string | null>(null);
   const [currentPageIndex, setCurrentPageIndex] = useState(0);
   const [isNewModalOpen, setIsNewModalOpen] = useState(false);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  
   const [currentTool, setCurrentTool] = useState<ToolType>('pen');
   const [toolSettings, setToolSettings] = useState(DEFAULT_TOOL_SETTINGS);
   const [isSmartShapesActive, setIsSmartShapesActive] = useState(false);
@@ -83,7 +96,7 @@ const App: React.FC = () => {
   const [isSidebarOpen, setIsSidebarOpen] = useState(window.innerWidth > 1024);
   const [isFocusMode, setIsFocusMode] = useState(false);
   const [aiResult, setAiResult] = useState<AIResponse | null>(null);
-  const [autopilotResult, setAutopilotResult] = useState<{ answer: string; x: number; y: number; confidence: number } | null>(null);
+  const [autopilotResult, setAutopilotResult] = useState<{ answer: string; x: number; y: number; confidence: number }[] | null>(null);
   const [isSolving, setIsSolving] = useState(false);
   const [isCleaning, setIsCleaning] = useState(false);
   const [isProcessingPDF, setIsProcessingPDF] = useState(false);
@@ -139,6 +152,86 @@ const App: React.FC = () => {
     }
   };
 
+  // --- Notebook Actions ---
+
+  const handleOpenNotebook = (id: string) => {
+    setActiveNotebookId(id);
+    setCurrentPageIndex(0);
+    setView('editor');
+    // Update last modified on open to bump "Recent" status
+    setNotebooks(prev => prev.map(n => n.id === id ? { ...n, lastModified: Date.now() } : n));
+  };
+
+  const handleTogglePin = (id: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setNotebooks(prev => prev.map(n => n.id === id ? { ...n, isPinned: !n.isPinned } : n));
+  };
+
+  const handleDeleteNotebook = (id: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (confirm("Are you sure you want to delete this notebook? This cannot be undone.")) {
+      setNotebooks(prev => prev.filter(n => n.id !== id));
+      if (activeNotebookId === id) {
+        setView('dashboard');
+        setActiveNotebookId(null);
+      }
+    }
+  };
+
+  const handleClearAllData = () => {
+    localStorage.removeItem('noteon_notebooks');
+    setNotebooks([]);
+    setView('dashboard');
+    setIsSettingsOpen(false);
+  };
+
+  // --- Page Actions ---
+
+  const handleAddPage = (insertIndex: number = -1) => {
+    if (!activeNotebookId) return;
+    const newPageId = `${activeNotebookId}-${Date.now()}`;
+    const newPage: Page = {
+      id: newPageId,
+      strokes: [],
+      textElements: [],
+      imageElements: [],
+      template: activeNotebook?.template || 'blank',
+    };
+
+    setNotebooks(prev => prev.map(n => {
+      if (n.id !== activeNotebookId) return n;
+      const newPages = [...n.pages];
+      if (insertIndex === -1) {
+        newPages.push(newPage);
+        setCurrentPageIndex(newPages.length - 1);
+      } else {
+        newPages.splice(insertIndex + 1, 0, newPage);
+        setCurrentPageIndex(insertIndex + 1);
+      }
+      return { ...n, pages: newPages, lastModified: Date.now() };
+    }));
+  };
+
+  const handleDeletePage = (e: React.MouseEvent, index: number) => {
+    e.stopPropagation();
+    if (!activeNotebookId || !activeNotebook || activeNotebook.pages.length <= 1) {
+      alert("Notebook must have at least one page.");
+      return;
+    }
+    if (confirm("Are you sure you want to delete this page?")) {
+      setNotebooks(prev => prev.map(n => {
+        if (n.id !== activeNotebookId) return n;
+        const newPages = n.pages.filter((_, i) => i !== index);
+        return { ...n, pages: newPages, lastModified: Date.now() };
+      }));
+      if (currentPageIndex >= index && currentPageIndex > 0) {
+        setCurrentPageIndex(prev => prev - 1);
+      }
+    }
+  };
+
+  // --- AI & Tools ---
+
   const handleSolve = async () => {
     if (!canvasRef.current || !currentPage || isSolving) return;
     const dataUrl = canvasRef.current.getCanvasImage(); if (!dataUrl) return;
@@ -180,45 +273,25 @@ const App: React.FC = () => {
   const handleImportPDF = async (file: File) => {
     setIsProcessingPDF(true);
     try {
-      // Load PDF into memory cache via service
       const { pdfId, numPages, title } = await loadPDFDocument(file);
-      
       const newId = `${Date.now()}`;
-      
       const newPages: Page[] = [];
       for (let i = 1; i <= numPages; i++) {
         newPages.push({
           id: `p-${newId}-${i}`,
-          strokes: [],
-          textElements: [],
-          imageElements: [],
-          template: 'blank', 
-          pdfId: pdfId,
-          pdfPageIndex: i
+          strokes: [], textElements: [], imageElements: [],
+          template: 'blank', pdfId: pdfId, pdfPageIndex: i
         });
       }
-
       const newNotebook: Notebook = {
-        id: newId,
-        title: title || 'Imported PDF',
-        coverColor: '#ef4444', 
-        template: 'blank',
-        pages: newPages,
-        lastModified: Date.now(),
-        tags: ['PDF Import']
+        id: newId, title: title || 'Imported PDF', coverColor: '#ef4444', template: 'blank', pages: newPages, lastModified: Date.now(), tags: ['PDF Import']
       };
-
       setNotebooks(prev => [newNotebook, ...prev]);
-      setActiveNotebookId(newId);
-      setCurrentPageIndex(0);
-      setView('editor');
-      setZoomScale(1.0);
+      setActiveNotebookId(newId); setCurrentPageIndex(0); setView('editor'); setZoomScale(1.0);
     } catch (err) {
       console.error("PDF Import failed", err);
-      alert("Failed to import PDF. Please try a different file.");
-    } finally {
-      setIsProcessingPDF(false);
-    }
+      alert("Failed to import PDF.");
+    } finally { setIsProcessingPDF(false); }
   };
 
   if (view === 'dashboard') return (
@@ -231,40 +304,90 @@ const App: React.FC = () => {
           </div>
         </div>
       )}
+      
+      {/* Sidebar - Integrated into Dashboard Layout */}
       <aside className="bg-white border-r border-slate-200 w-80 flex-shrink-0 hidden lg:flex flex-col z-40 p-8 shadow-sm">
-        <div className="flex items-center gap-4 mb-14"><div className="bg-indigo-600 p-3 rounded-2xl shadow-xl shadow-indigo-100 transform -rotate-6"><Zap className="text-white" size={24} fill="currentColor" /></div><div><h1 className="text-2xl font-black tracking-tighter uppercase italic leading-none">NOTEON</h1><span className="text-[10px] font-bold text-slate-400 tracking-[0.2em] uppercase">Document Insights</span></div></div>
-        <nav className="space-y-2 mb-12"><NavBtn active icon={<LayoutGrid size={20} />} label="Archive" /><NavBtn icon={<Clock size={20} />} label="Recent Solves" /><NavBtn icon={<Star size={20} />} label="Pinned" /><NavBtn icon={<Settings size={20} />} label="Settings" /></nav>
+        <div className="flex items-center gap-4 mb-14">
+          <div className="bg-indigo-600 p-3 rounded-2xl shadow-xl shadow-indigo-100 transform -rotate-6">
+            <Zap className="text-white" size={24} fill="currentColor" />
+          </div>
+          <div>
+            <h1 className="text-2xl font-black tracking-tighter uppercase italic leading-none">NOTEON</h1>
+            <span className="text-[10px] font-bold text-slate-400 tracking-[0.2em] uppercase">Document Insights</span>
+          </div>
+        </div>
+        
+        <nav className="space-y-2 mb-12">
+          <NavBtn active={dashboardView === 'all'} onClick={() => setDashboardView('all')} icon={<LayoutGrid size={20} />} label="Archive" />
+          <NavBtn active={dashboardView === 'recent'} onClick={() => setDashboardView('recent')} icon={<Clock size={20} />} label="Recent Activity" />
+          <NavBtn active={dashboardView === 'pinned'} onClick={() => setDashboardView('pinned')} icon={<Star size={20} />} label="Pinned" />
+          <NavBtn onClick={() => setIsSettingsOpen(true)} icon={<Settings size={20} />} label="Settings" />
+        </nav>
+
+        <div className="mt-auto">
+          <div className="p-4 bg-slate-50 rounded-2xl border border-slate-100">
+            <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Storage Status</p>
+            <div className="w-full h-1.5 bg-slate-200 rounded-full mb-2 overflow-hidden">
+               <div className="h-full bg-indigo-500 w-[15%] rounded-full"></div>
+            </div>
+            <p className="text-xs font-bold text-slate-600">{notebooks.length} Notebooks Stored</p>
+          </div>
+        </div>
       </aside>
+
       <Dashboard 
         notebooks={notebooks} 
-        onSelectNotebook={(id) => { setActiveNotebookId(id); setCurrentPageIndex(0); setView('editor'); }} 
+        viewCategory={dashboardView}
+        onSelectNotebook={handleOpenNotebook} 
         onCreateClick={() => setIsNewModalOpen(true)} 
         onImportPDF={handleImportPDF}
+        onTogglePin={handleTogglePin}
+        onDeleteNotebook={handleDeleteNotebook}
       />
+      
       {isNewModalOpen && <NewNotebookModal onClose={() => setIsNewModalOpen(false)} onCreate={createNotebook} />}
+      {isSettingsOpen && <SettingsModal onClose={() => setIsSettingsOpen(false)} onClearAllData={handleClearAllData} />}
     </div>
   );
 
   return (
     <div className="flex h-screen w-screen bg-slate-100 overflow-hidden font-sans text-slate-900">
-      <aside className={`bg-white border-r border-slate-200 w-80 flex-shrink-0 transition-all duration-300 ease-in-out flex flex-col z-[70] ${isFocusMode ? '-translate-x-full absolute h-full' : (isSidebarOpen ? 'translate-x-0 shadow-2xl' : '-translate-x-full absolute h-full lg:relative lg:translate-x-0 lg:w-0 lg:overflow-hidden lg:border-none')}`}>
-        <div className="p-8 pb-4"><div className="flex items-center justify-between mb-8"><button onClick={() => setView('dashboard')} className="flex items-center gap-3 group"><div className="bg-slate-100 p-2.5 rounded-2xl group-hover:bg-indigo-50 transition-all"><ChevronLeft size={20} /></div><span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Archive</span></button></div></div>
-        <nav className="flex-1 overflow-y-auto px-6 custom-scrollbar space-y-4 pb-8">{activeNotebook?.pages.map((page, idx) => (
-          <div key={page.id} className={`group/item relative flex flex-col gap-2 p-2 rounded-[24px] transition-all border cursor-pointer ${currentPageIndex === idx ? 'bg-indigo-50 border-indigo-200 shadow-sm' : 'bg-white border-slate-100 shadow-sm'}`} onClick={() => setCurrentPageIndex(idx)}>
-            <div className="aspect-[3/4] bg-slate-200 rounded-[18px] overflow-hidden relative shadow-inner">
-               <div className="w-full h-full flex items-center justify-center text-slate-300">
-                  {/* If Page has background (PDF), show preview? For now simple icon */}
-                  {page.pdfId ? <span className="text-xs font-bold text-slate-400">PDF {page.pdfPageIndex}</span> : <FileText size={32} />}
-               </div>
-               {page.backgroundUrl && <div className="absolute inset-0 bg-cover bg-center opacity-50" style={{ backgroundImage: `url(${page.backgroundUrl})` }} />}
-            </div>
-            <div className="flex items-center justify-between px-2 py-1"><span className={`text-[10px] font-black uppercase ${currentPageIndex === idx ? 'text-indigo-600' : 'text-slate-400'}`}>Page {idx + 1}</span></div>
-          </div>
-        ))}</nav>
+      {/* Sidebar with Thumbnails */}
+      <aside className={`bg-slate-50 border-r border-slate-200 w-[200px] flex-shrink-0 transition-all duration-300 ease-in-out flex flex-col z-[70] ${isFocusMode ? '-translate-x-full absolute h-full' : (isSidebarOpen ? 'translate-x-0' : '-translate-x-full absolute h-full lg:relative lg:translate-x-0 lg:w-0 lg:overflow-hidden lg:border-none')}`}>
+        <div className="p-6 pb-2">
+           <div className="flex items-center justify-between mb-4">
+              <button onClick={() => setView('dashboard')} className="flex items-center gap-2 group text-slate-500 hover:text-indigo-600 transition-colors">
+                <ChevronLeft size={16} />
+                <span className="text-xs font-bold uppercase tracking-widest">Library</span>
+              </button>
+           </div>
+           <h3 className="text-sm font-black text-slate-900 leading-tight mb-6 line-clamp-2">{activeNotebook?.title}</h3>
+        </div>
+        
+        <div className="flex-1 overflow-y-auto px-4 custom-scrollbar pb-8 flex flex-col gap-8 items-center">
+          {activeNotebook?.pages.map((page, idx) => (
+            <PageThumbnail 
+              key={page.id}
+              page={page}
+              pageNumber={idx + 1}
+              isActive={currentPageIndex === idx}
+              onClick={() => setCurrentPageIndex(idx)}
+              onDelete={(e) => handleDeletePage(e, idx)}
+              onInsertAfter={(e) => handleAddPage(idx)}
+            />
+          ))}
+          
+          <button onClick={() => handleAddPage(activeNotebook?.pages.length ? activeNotebook.pages.length - 1 : -1)} className="w-[140px] py-4 border-2 border-dashed border-slate-300 rounded-xl flex flex-col items-center justify-center text-slate-400 hover:border-indigo-400 hover:text-indigo-600 hover:bg-indigo-50 transition-all gap-2 group">
+             <Plus size={24} className="group-hover:scale-110 transition-transform"/>
+             <span className="text-[10px] font-black uppercase tracking-widest">Add Page</span>
+          </button>
+        </div>
       </aside>
+
+      {/* Main Content */}
       <main className="flex-1 flex flex-col relative overflow-hidden min-w-0 bg-[#f1f5f9]">
         <header className={`bg-white/95 backdrop-blur-xl border-b border-slate-200 px-6 md:px-10 py-4 flex items-center justify-between z-[60] shadow-sm shrink-0 transition-transform duration-500 ${isFocusMode ? '-translate-y-full absolute w-full' : 'translate-y-0'}`}>
-          <div className="flex items-center gap-4 md:gap-8 min-w-0"><button onClick={() => setIsSidebarOpen(!isSidebarOpen)} className="p-2.5 hover:bg-slate-100 rounded-xl bg-white border border-slate-200 shadow-sm transition-all shrink-0"><Menu size={20} /></button><div><h2 className="text-base md:text-xl font-black text-slate-900 tracking-tight leading-none truncate">{activeNotebook?.title}</h2></div></div>
+          <div className="flex items-center gap-4 md:gap-8 min-w-0"><button onClick={() => setIsSidebarOpen(!isSidebarOpen)} className="p-2.5 hover:bg-slate-100 rounded-xl bg-white border border-slate-200 shadow-sm transition-all shrink-0"><Menu size={20} /></button><div><h2 className="text-base md:text-xl font-black text-slate-900 tracking-tight leading-none truncate flex items-center gap-2"><BookOpen size={18} className="text-indigo-600"/> <span className="opacity-40">/</span> Page {currentPageIndex + 1}</h2></div></div>
           <div className="flex items-center gap-4">
             <div className="flex items-center bg-slate-100 p-1 rounded-2xl border border-slate-200 mr-2"><button onClick={handleUndo} disabled={historyIndex <= 0} className="p-2 hover:bg-white rounded-xl text-slate-500 disabled:opacity-20 transition-all"><Undo2 size={18} /></button><button onClick={handleRedo} disabled={historyIndex >= history.length - 1} className="p-2 hover:bg-white rounded-xl text-slate-500 disabled:opacity-20 transition-all"><Redo2 size={18} /></button></div>
             <div className="flex items-center bg-slate-100 p-1 rounded-2xl border border-slate-200"><button onClick={() => setZoomScale(prev => Math.max(0.1, prev - 0.1))} className="p-2 hover:bg-white rounded-xl text-slate-500 transition-all"><ZoomOut size={16} /></button><span className="px-3 min-w-[55px] text-center text-[10px] font-black text-slate-600">{Math.round(zoomScale * 100)}%</span><button onClick={() => setZoomScale(prev => Math.min(4.0, prev + 0.1))} className="p-2 hover:bg-white rounded-xl text-slate-500 transition-all"><ZoomIn size={16} /></button></div>

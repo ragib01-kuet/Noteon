@@ -154,7 +154,12 @@ export const autoCorrectShapeAI = async (strokeGroup: Point[][]): Promise<SmartS
 
     const text = response.text?.replace(/```json|```/g, "").trim();
     if (!text) throw new Error("Empty AI response");
-    const result = JSON.parse(text) as SmartShapeResponse;
+    
+    // Attempt to parse JSON safely, even if there is extra text
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    const result = JSON.parse(jsonMatch ? jsonMatch[0] : text) as SmartShapeResponse;
+
+    if (!result || !Array.isArray(result.shapes)) return { shapes: [] };
 
     // Denormalize: Map the 0-1000 points back to the original canvas location
     result.shapes = result.shapes.map(shape => {
@@ -177,19 +182,110 @@ export const autoCorrectShapeAI = async (strokeGroup: Point[][]): Promise<SmartS
   }
 };
 
+const solverResponseSchema = {
+  type: Type.OBJECT,
+  properties: {
+    type: { type: Type.STRING, enum: ['math', 'physics', 'chemistry', 'text'] },
+    problemDescription: { type: Type.STRING },
+    solution: { type: Type.STRING },
+    latex: { type: Type.STRING },
+    steps: { 
+      type: Type.ARRAY, 
+      items: { type: Type.STRING } 
+    },
+    insights: {
+      type: Type.ARRAY,
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          formula: { type: Type.STRING },
+          concept: { type: Type.STRING },
+          description: { type: Type.STRING },
+        },
+        required: ['formula', 'concept', 'description']
+      }
+    },
+    autopilot: {
+      type: Type.ARRAY,
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          answer: { type: Type.STRING },
+          x: { type: Type.NUMBER },
+          y: { type: Type.NUMBER },
+          confidence: { type: Type.NUMBER },
+        },
+        required: ['answer', 'x', 'y', 'confidence']
+      }
+    },
+    simulation: {
+       type: Type.OBJECT,
+       properties: {
+          type: { type: Type.STRING },
+          parameters: {
+             type: Type.OBJECT,
+             properties: {
+                initialVelocity: { type: Type.NUMBER },
+                angle: { type: Type.NUMBER },
+                mass: { type: Type.NUMBER },
+                gravity: { type: Type.NUMBER },
+                frictionCoefficient: { type: Type.NUMBER }
+             }
+          }
+       }
+    },
+    warning: { type: Type.STRING }
+  },
+  required: ['type', 'solution', 'latex', 'steps', 'problemDescription']
+};
+
 export const solveHandwriting = async (base64Image: string, isAutopilot: boolean = false): Promise<AIResponse> => {
   const apiKey = getApiKey();
   if (!apiKey) throw new Error("API Key missing");
   const ai = new GoogleGenAI({ apiKey });
   const model = isAutopilot ? 'gemini-3-flash-preview' : 'gemini-3-pro-preview';
+  
+  const autopilotInstruction = `
+    AUTOPILOT MODE:
+    1. Identify ALL distinct handwritten math problems in the image.
+    2. Solve each problem.
+    3. Return a list of 'autopilot' objects.
+    4. For each object, provide the 'answer' string and the (x, y) coordinates where the answer should be written.
+    5. COORDINATES: The image is 1000x1000 units. Estimate the (x, y) for the empty space after the equals sign.
+    6. Return purely JSON.
+  `;
+
   try {
     const response = await ai.models.generateContent({
       model,
-      contents: [{ parts: [{ text: isAutopilot ? "AUTOPILOT: Solve problem." : "FULL SOLVE: Deep derivation." }, { inlineData: { mimeType: "image/png", data: base64Image.split(',')[1] } }] }],
-      config: { responseMimeType: "application/json" },
+      contents: [{ 
+        parts: [
+          { text: isAutopilot ? autopilotInstruction : "FULL SOLVE: Analyze and derive the solution. Return purely JSON." }, 
+          { inlineData: { mimeType: "image/png", data: base64Image.split(',')[1] } }
+        ] 
+      }],
+      config: { 
+        responseMimeType: "application/json",
+        responseSchema: solverResponseSchema
+      },
     });
-    return JSON.parse(response.text?.replace(/```json|```/g, "") || "{}") as AIResponse;
-  } catch (e) { throw e; }
+
+    const rawText = response.text;
+    if (!rawText) throw new Error("AI returned no text response.");
+
+    // Robust JSON extraction to handle thought traces
+    let jsonStr = rawText.trim();
+    const jsonStart = jsonStr.indexOf('{');
+    const jsonEnd = jsonStr.lastIndexOf('}');
+    if (jsonStart !== -1 && jsonEnd !== -1) {
+      jsonStr = jsonStr.substring(jsonStart, jsonEnd + 1);
+    }
+    
+    return JSON.parse(jsonStr) as AIResponse;
+  } catch (e) { 
+    console.error("AI Solve Failed:", e);
+    throw e; 
+  }
 };
 
 export const cleanPhysicsDiagram = async (base64Image: string): Promise<DiagramResponse> => {

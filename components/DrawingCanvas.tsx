@@ -12,7 +12,7 @@ interface DrawingCanvasProps {
   strokes: Stroke[];
   textElements: TextElement[];
   imageElements: ImageElement[];
-  autopilotResult?: { answer: string; x: number; y: number; confidence: number } | null;
+  autopilotResult?: { answer: string; x: number; y: number; confidence: number }[] | null;
   backgroundUrl?: string;
   setStrokes: (data: { strokes?: Stroke[]; textElements?: TextElement[]; imageElements?: ImageElement[] }) => void;
   template: 'blank' | 'ruled' | 'grid';
@@ -259,10 +259,33 @@ const DrawingCanvas = forwardRef<CanvasHandle, DrawingCanvasProps>(({
       ctx.stroke(); 
       ctx.fill();
     }
+
+    // --- Autopilot Answers ---
+    if (autopilotResult && autopilotResult.length > 0) {
+      ctx.save();
+      ctx.font = `bold 32px 'Kalam', cursive`;
+      ctx.textBaseline = 'middle';
+      ctx.textAlign = 'left';
+      
+      autopilotResult.forEach(item => {
+        // Convert 1000x1000 coordinate space to logical space
+        const x = (item.x / 1000) * LOGICAL_WIDTH;
+        const y = (item.y / 1000) * LOGICAL_HEIGHT;
+
+        // Shadow/Glow for visibility
+        ctx.shadowColor = 'rgba(79, 70, 229, 0.3)';
+        ctx.shadowBlur = 10;
+        
+        ctx.fillStyle = '#4f46e5'; // Indigo-600
+        ctx.fillText(item.answer, x, y);
+      });
+      ctx.restore();
+    }
+
     ctx.restore();
   };
 
-  useEffect(() => { renderInk(); }, [activeStrokes, currentStroke, lassoPolygon, selectedElementIds, activeResizeHandle]);
+  useEffect(() => { renderInk(); }, [activeStrokes, currentStroke, lassoPolygon, selectedElementIds, activeResizeHandle, autopilotResult]);
 
   // -- Event Logic --
 

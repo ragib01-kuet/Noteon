@@ -6,7 +6,6 @@ const PDFJS_VERSION = '4.10.38';
 const WORKER_SRC = `https://esm.sh/pdfjs-dist@${PDFJS_VERSION}/build/pdf.worker.min.mjs`;
 
 // In-memory cache for loaded PDF documents. 
-// In a real production app, this might be backed by IndexedDB.
 const pdfCache = new Map<string, any>();
 
 let isWorkerInitialized = false;
@@ -32,7 +31,6 @@ const initWorker = () => {
 
 /**
  * Loads a PDF file into memory and returns metadata + a session ID.
- * Does NOT render pages to images immediately.
  */
 export const loadPDFDocument = async (file: File) => {
   initWorker();
@@ -43,7 +41,6 @@ export const loadPDFDocument = async (file: File) => {
     // @ts-ignore
     const lib = pdfjsLib.default || pdfjsLib;
     
-    // Load the document proxy
     const loadingTask = lib.getDocument({
       data: arrayBuffer,
       cMapUrl: `https://esm.sh/pdfjs-dist@${PDFJS_VERSION}/cmaps/`,
@@ -51,11 +48,7 @@ export const loadPDFDocument = async (file: File) => {
     });
 
     const pdfDoc = await loadingTask.promise;
-    
-    // Generate a unique ID for this session
     const pdfId = `pdf-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-    
-    // Store in cache
     pdfCache.set(pdfId, pdfDoc);
 
     return {
@@ -71,44 +64,47 @@ export const loadPDFDocument = async (file: File) => {
 
 /**
  * Renders a specific page of a PDF onto a canvas context.
- * This is efficient and allows for crisp zooming.
+ * supports both high-res main view rendering and low-res thumbnail rendering.
  */
 export const renderPDFPageToCanvas = async (
   pdfId: string,
   pageIndex: number,
   canvas: HTMLCanvasElement,
-  scale: number = 1.0 // This is the zoom level
+  scaleOrWidth: number = 1.0, 
+  mode: 'scale' | 'fit-width' = 'scale'
 ) => {
   const pdfDoc = pdfCache.get(pdfId);
   if (!pdfDoc) {
-    console.warn(`PDF Document ${pdfId} not found in cache.`);
+    // If cache is missing (reload), we might fail gracefully or return empty
     return;
   }
 
   try {
     const page = await pdfDoc.getPage(pageIndex);
-    
-    // We want the PDF page to fit roughly within our logical width (850px)
-    // But we also want to respect the user's zoom level.
-    // First, get the unscaled viewport to know native dimensions
     const unscaledViewport = page.getViewport({ scale: 1 });
     
-    // Calculate a base scale to fit width (optional, depends on design)
-    // For NoteOn, let's assume we want to map PDF points to our logical 850px width if it's A4
-    // or just render it at a high enough DPI.
-    
-    // High DPI rendering scale (2x for retina) * Zoom Scale
-    const pixelRatio = window.devicePixelRatio || 1;
-    const finalScale = scale * pixelRatio * (850 / unscaledViewport.width); 
+    let finalScale = 1;
+
+    if (mode === 'fit-width') {
+      // Scale to fit a specific pixel width (e.g., 850px for main, 150px for thumb)
+      // We take devicePixelRatio into account for sharpness
+      const dpr = window.devicePixelRatio || 1;
+      finalScale = (scaleOrWidth / unscaledViewport.width) * dpr;
+    } else {
+      // Just apply the zoom multiplier relative to 72dpi? 
+      // Actually, for NoteOn main view, we treat 'scale=1' as fitting 850px width logic
+      const dpr = window.devicePixelRatio || 1;
+      const baseScale = (850 / unscaledViewport.width);
+      finalScale = baseScale * scaleOrWidth * dpr;
+    }
 
     const viewport = page.getViewport({ scale: finalScale });
 
-    // Match canvas dimensions to the viewport
-    canvas.width = viewport.width;
-    canvas.height = viewport.height;
-    
-    // Style width/height should match the logical size for CSS layout
-    // but here we just ensure the internal bitmap is high quality.
+    // Ensure canvas matches the viewport dimensions
+    if (canvas.width !== viewport.width || canvas.height !== viewport.height) {
+        canvas.width = viewport.width;
+        canvas.height = viewport.height;
+    }
     
     const context = canvas.getContext('2d');
     if (!context) return;
@@ -121,9 +117,10 @@ export const renderPDFPageToCanvas = async (
       viewport: viewport,
     };
 
+    // If a render task is already running on this canvas, we might want to cancel it
+    // But for simplicity in this version, we just await.
     await page.render(renderContext).promise;
     
-    // Cleanup if needed (v4 might handle this automatically)
     // @ts-ignore
     if (page.cleanup) page.cleanup();
     
@@ -134,7 +131,7 @@ export const renderPDFPageToCanvas = async (
 
 export const getPDFPageAspectRatio = async (pdfId: string, pageIndex: number): Promise<number> => {
    const pdfDoc = pdfCache.get(pdfId);
-   if (!pdfDoc) return 0.77; // Default A4
+   if (!pdfDoc) return 0.77; 
    try {
      const page = await pdfDoc.getPage(pageIndex);
      const viewport = page.getViewport({ scale: 1.0 });

@@ -14,9 +14,11 @@ const AIResultPanel: React.FC<AIResultPanelProps> = ({ result, onClose }) => {
   if (!result) return null;
 
   const copyLatex = () => {
-    navigator.clipboard.writeText(result.latex);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    if (result.latex) {
+      navigator.clipboard.writeText(result.latex);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
   };
 
   return (
@@ -28,7 +30,7 @@ const AIResultPanel: React.FC<AIResultPanelProps> = ({ result, onClose }) => {
             <Atom size={20} />
           </div>
           <div>
-            <h3 className="font-bold text-slate-800 text-lg capitalize">{result.type} Intelligence</h3>
+            <h3 className="font-bold text-slate-800 text-lg capitalize">{result.type || "General"} Intelligence</h3>
             <div className="flex items-center gap-1.5">
               <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
               <p className="text-[10px] uppercase tracking-widest text-slate-500 font-black">AI Solver Active</p>
@@ -47,16 +49,19 @@ const AIResultPanel: React.FC<AIResultPanelProps> = ({ result, onClose }) => {
             <h4 className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Final Result</h4>
             <button 
               onClick={copyLatex}
-              className={`flex items-center gap-1.5 text-[10px] font-bold px-2 py-1 rounded-md transition-all ${copied ? 'bg-green-100 text-green-600' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}
+              disabled={!result.latex}
+              className={`flex items-center gap-1.5 text-[10px] font-bold px-2 py-1 rounded-md transition-all ${copied ? 'bg-green-100 text-green-600' : 'bg-slate-100 text-slate-500 hover:bg-slate-200 disabled:opacity-50'}`}
             >
               <Copy size={12} />
               {copied ? 'COPIED LaTeX' : 'COPY LaTeX'}
             </button>
           </div>
           <div className="bg-slate-900 p-5 rounded-2xl shadow-inner group relative">
-             <p className="text-2xl font-bold text-indigo-400 font-mono mb-2">{result.solution}</p>
+             <p className="text-2xl font-bold text-indigo-400 font-mono mb-2 break-all">
+               {result.solution || "Analysis Complete"}
+             </p>
              <code className="text-[11px] text-slate-500 block truncate font-mono bg-black/30 p-2 rounded">
-               {result.latex}
+               {result.latex || "No LaTeX source available"}
              </code>
           </div>
         </section>
@@ -67,19 +72,23 @@ const AIResultPanel: React.FC<AIResultPanelProps> = ({ result, onClose }) => {
             <Info size={12} /> Logical Derivation
           </h4>
           <div className="space-y-4">
-            {result.steps.map((step, idx) => (
-              <div key={idx} className="flex gap-4 group">
-                <div className="flex flex-col items-center">
-                  <div className="w-7 h-7 bg-white border-2 border-indigo-100 text-indigo-600 rounded-full flex items-center justify-center text-xs font-bold shrink-0 shadow-sm transition-colors group-hover:border-indigo-400">
-                    {idx + 1}
+            {(result.steps && result.steps.length > 0) ? (
+              result.steps.map((step, idx) => (
+                <div key={idx} className="flex gap-4 group">
+                  <div className="flex flex-col items-center">
+                    <div className="w-7 h-7 bg-white border-2 border-indigo-100 text-indigo-600 rounded-full flex items-center justify-center text-xs font-bold shrink-0 shadow-sm transition-colors group-hover:border-indigo-400">
+                      {idx + 1}
+                    </div>
+                    {idx !== result.steps.length - 1 && <div className="w-0.5 h-full bg-slate-100 mt-2"></div>}
                   </div>
-                  {idx !== result.steps.length - 1 && <div className="w-0.5 h-full bg-slate-100 mt-2"></div>}
+                  <p className="text-sm text-slate-600 leading-relaxed pt-1 group-hover:text-slate-900 transition-colors">
+                    {step}
+                  </p>
                 </div>
-                <p className="text-sm text-slate-600 leading-relaxed pt-1 group-hover:text-slate-900 transition-colors">
-                  {step}
-                </p>
-              </div>
-            ))}
+              ))
+            ) : (
+               <p className="text-sm text-slate-400 italic">No derivation steps provided.</p>
+            )}
           </div>
         </section>
 
@@ -101,20 +110,22 @@ const AIResultPanel: React.FC<AIResultPanelProps> = ({ result, onClose }) => {
         )}
 
         {/* Insights Section */}
-        <section>
-          <h4 className="text-[10px] font-bold text-slate-400 uppercase mb-4 tracking-widest flex items-center gap-2">
-            <BookMarked size={12} /> Predictive Insights
-          </h4>
-          <div className="grid gap-3">
-            {result.insights.map((insight, idx) => (
-              <div key={idx} className="p-4 bg-slate-50 rounded-2xl border border-slate-100 hover:border-indigo-200 hover:bg-indigo-50/30 transition-all cursor-pointer group">
-                <p className="text-[10px] font-black text-indigo-500 uppercase mb-1 tracking-tighter">{insight.concept}</p>
-                <p className="text-xs font-bold text-slate-700 mb-2 group-hover:text-indigo-700">{insight.formula}</p>
-                <p className="text-[11px] text-slate-500 leading-tight">{insight.description}</p>
-              </div>
-            ))}
-          </div>
-        </section>
+        {result.insights && result.insights.length > 0 && (
+          <section>
+            <h4 className="text-[10px] font-bold text-slate-400 uppercase mb-4 tracking-widest flex items-center gap-2">
+              <BookMarked size={12} /> Predictive Insights
+            </h4>
+            <div className="grid gap-3">
+              {result.insights.map((insight, idx) => (
+                <div key={idx} className="p-4 bg-slate-50 rounded-2xl border border-slate-100 hover:border-indigo-200 hover:bg-indigo-50/30 transition-all cursor-pointer group">
+                  <p className="text-[10px] font-black text-indigo-500 uppercase mb-1 tracking-tighter">{insight.concept}</p>
+                  <p className="text-xs font-bold text-slate-700 mb-2 group-hover:text-indigo-700">{insight.formula}</p>
+                  <p className="text-[11px] text-slate-500 leading-tight">{insight.description}</p>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
       </div>
       
       <div className="p-6 border-t border-slate-100 bg-slate-50/50">

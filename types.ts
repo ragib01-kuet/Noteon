@@ -60,6 +60,7 @@ export interface Notebook {
   lastModified: number;
   tags: string[];
   pdfDataId?: string; // ID of the PDF file associated with this notebook
+  isPinned?: boolean;
 }
 
 export interface AIResponse {
@@ -88,7 +89,7 @@ export interface AIResponse {
     x: number; 
     y: number; 
     confidence: number;
-  };
+  }[];
   warning?: string;
 }
 
