@@ -12,7 +12,6 @@ interface DrawingCanvasProps {
   strokes: Stroke[];
   textElements: TextElement[];
   imageElements: ImageElement[];
-  autopilotResult?: { answer: string; x: number; y: number; confidence: number }[] | null;
   backgroundUrl?: string;
   setStrokes: (data: { strokes?: Stroke[]; textElements?: TextElement[]; imageElements?: ImageElement[] }) => void;
   template: 'blank' | 'ruled' | 'grid';
@@ -53,6 +52,22 @@ const isPointNearStroke = (p: Point, s: Stroke, tol: number): boolean => {
   return false;
 };
 
+// Helper to get bounds for text (using canvas context for measurement)
+const getTextBounds = (t: TextElement, ctx: CanvasRenderingContext2D): BoundingBox => {
+    ctx.save();
+    ctx.font = `bold ${t.fontSize}px 'Kalam', cursive`;
+    const m = ctx.measureText(t.text);
+    ctx.restore();
+    return {
+        minX: t.x,
+        maxX: t.x + m.width,
+        minY: t.y - t.fontSize/2, // Approximate middle baseline
+        maxY: t.y + t.fontSize/2,
+        width: m.width,
+        height: t.fontSize
+    };
+};
+
 const drawTexturedPath = (ctx: CanvasRenderingContext2D, points: Point[], color: string, width: number, opacity: number, brush: BrushType) => {
   if (points.length < 1) return;
   ctx.save();
@@ -69,7 +84,7 @@ const drawTexturedPath = (ctx: CanvasRenderingContext2D, points: Point[], color:
 };
 
 const DrawingCanvas = forwardRef<CanvasHandle, DrawingCanvasProps>(({ 
-  currentTool, brushType, color, strokeSize, strokes, textElements, imageElements, autopilotResult, setStrokes, template, zoomScale = 1.0, smartShapesEnabled = false, backgroundUrl, pdfId, pdfPageIndex
+  currentTool, brushType, color, strokeSize, strokes, textElements, imageElements, setStrokes, template, zoomScale = 1.0, smartShapesEnabled = false, backgroundUrl, pdfId, pdfPageIndex
 }, ref) => {
   // We use TWO canvases now. One for the static background (PDF/Image) and one for active Ink.
   // This prevents redrawing the heavy PDF on every mouse move.
@@ -87,12 +102,14 @@ const DrawingCanvas = forwardRef<CanvasHandle, DrawingCanvasProps>(({
   
   // Local manipulation state (avoids full app re-renders during drag)
   const [tempStrokes, setTempStrokes] = useState<Stroke[] | null>(null);
+  const [tempTextElements, setTempTextElements] = useState<TextElement[] | null>(null);
 
   // Resize State
   const [activeResizeHandle, setActiveResizeHandle] = useState<ResizeHandleType | null>(null);
   const [resizeSnapshot, setResizeSnapshot] = useState<{
     originalBounds: BoundingBox;
     originalStrokes: Stroke[]; 
+    originalText: TextElement[];
   } | null>(null);
 
   // Smart Shape State
@@ -183,17 +200,44 @@ const DrawingCanvas = forwardRef<CanvasHandle, DrawingCanvasProps>(({
     
   }, [pdfId, pdfPageIndex, backgroundImage, template, zoomScale, dpr]);
 
-  // Derived state for rendering: Use tempStrokes if dragging, otherwise props.strokes
+  // Derived state for rendering: Use temp arrays if dragging/manipulating
   const activeStrokes = useMemo(() => tempStrokes || strokes, [tempStrokes, strokes]);
+  const activeTextElements = useMemo(() => tempTextElements || textElements, [tempTextElements, textElements]);
 
+  // Calculate Selection Rect (includes both strokes and text)
   const selectionRect = useMemo(() => {
     if (selectedElementIds.length === 0) return null;
+    
     const selectedPoints = activeStrokes
       .filter(s => selectedElementIds.includes(s.id))
       .flatMap(s => s.points);
-    if (selectedPoints.length === 0) return null;
-    return calcBoundingBox(selectedPoints);
-  }, [selectedElementIds, activeStrokes]);
+
+    const selectedText = activeTextElements.filter(t => selectedElementIds.includes(t.id));
+    
+    // If we need context for text measurement, we might be slightly inaccurate here without it.
+    // However, text dragging usually updates position which is cheap.
+    // For bounds calculation, we can assume approximate bounds or use a temporary canvas if needed.
+    // Let's use the actual canvas context in render loop for accurate drawing, 
+    // but here we might need a rough estimate or access the ref.
+    // Hack: We'll skip complex text measurement here and rely on render loop or use basic estimation.
+    
+    let points = [...selectedPoints];
+    
+    // Add text corners to points cloud
+    if (inkCanvasRef.current) {
+        const ctx = inkCanvasRef.current.getContext('2d');
+        if (ctx) {
+            selectedText.forEach(t => {
+                const b = getTextBounds(t, ctx);
+                points.push({x: b.minX, y: b.minY});
+                points.push({x: b.maxX, y: b.maxY});
+            });
+        }
+    }
+
+    if (points.length === 0) return null;
+    return calcBoundingBox(points);
+  }, [selectedElementIds, activeStrokes, activeTextElements]);
 
   // --- Ink Rendering (Layer 1) ---
   const renderInk = () => {
@@ -211,6 +255,7 @@ const DrawingCanvas = forwardRef<CanvasHandle, DrawingCanvasProps>(({
     ctx.save(); 
     ctx.scale(dpr, dpr);
 
+    // 1. Render Strokes
     activeStrokes.forEach(s => {
       ctx.save();
       if (selectedElementIds.includes(s.id)) { ctx.shadowBlur = 4; ctx.shadowColor = 'rgba(79, 70, 229, 0.4)'; }
@@ -219,6 +264,22 @@ const DrawingCanvas = forwardRef<CanvasHandle, DrawingCanvasProps>(({
       ctx.restore();
     });
 
+    // 2. Render Text
+    activeTextElements.forEach(t => {
+       ctx.save();
+       ctx.font = `bold ${t.fontSize}px 'Kalam', cursive`;
+       ctx.fillStyle = t.color;
+       ctx.textBaseline = 'middle';
+       ctx.textAlign = 'left';
+       if (selectedElementIds.includes(t.id)) {
+           ctx.shadowColor = 'rgba(79, 70, 229, 0.5)';
+           ctx.shadowBlur = 8;
+       }
+       ctx.fillText(t.text, t.x, t.y);
+       ctx.restore();
+    });
+
+    // 3. Render Current Drawing Stroke
     if (currentStroke.length > 1) {
       if (currentTool === 'eraser') {
         ctx.strokeStyle = '#ef4444'; ctx.lineWidth = 1; ctx.globalAlpha = 0.5;
@@ -229,7 +290,7 @@ const DrawingCanvas = forwardRef<CanvasHandle, DrawingCanvasProps>(({
       }
     }
 
-    // Render Selection UI
+    // 4. Render Selection UI
     if (selectionRect && currentTool === 'select') {
       const { minX, minY, width, height } = selectionRect;
       
@@ -250,6 +311,7 @@ const DrawingCanvas = forwardRef<CanvasHandle, DrawingCanvasProps>(({
       drawSquare(minX + width + 5, minY + height + 5); // SE
     }
 
+    // 5. Render Lasso
     if (lassoPolygon.length > 1) {
       ctx.strokeStyle = '#4f46e5'; ctx.lineWidth = 2; ctx.setLineDash([4, 4]); 
       ctx.fillStyle = 'rgba(79, 70, 229, 0.1)';
@@ -260,32 +322,10 @@ const DrawingCanvas = forwardRef<CanvasHandle, DrawingCanvasProps>(({
       ctx.fill();
     }
 
-    // --- Autopilot Answers ---
-    if (autopilotResult && autopilotResult.length > 0) {
-      ctx.save();
-      ctx.font = `bold 32px 'Kalam', cursive`;
-      ctx.textBaseline = 'middle';
-      ctx.textAlign = 'left';
-      
-      autopilotResult.forEach(item => {
-        // Convert 1000x1000 coordinate space to logical space
-        const x = (item.x / 1000) * LOGICAL_WIDTH;
-        const y = (item.y / 1000) * LOGICAL_HEIGHT;
-
-        // Shadow/Glow for visibility
-        ctx.shadowColor = 'rgba(79, 70, 229, 0.3)';
-        ctx.shadowBlur = 10;
-        
-        ctx.fillStyle = '#4f46e5'; // Indigo-600
-        ctx.fillText(item.answer, x, y);
-      });
-      ctx.restore();
-    }
-
     ctx.restore();
   };
 
-  useEffect(() => { renderInk(); }, [activeStrokes, currentStroke, lassoPolygon, selectedElementIds, activeResizeHandle, autopilotResult]);
+  useEffect(() => { renderInk(); }, [activeStrokes, activeTextElements, currentStroke, lassoPolygon, selectedElementIds, activeResizeHandle]);
 
   // -- Event Logic --
 
@@ -339,20 +379,40 @@ const DrawingCanvas = forwardRef<CanvasHandle, DrawingCanvasProps>(({
           setActiveResizeHandle(handle);
           setResizeSnapshot({
             originalBounds: { ...selectionRect },
-            originalStrokes: strokes.filter(s => selectedElementIds.includes(s.id))
+            originalStrokes: strokes.filter(s => selectedElementIds.includes(s.id)),
+            originalText: textElements.filter(t => selectedElementIds.includes(t.id))
           });
           setTempStrokes(strokes); 
+          setTempTextElements(textElements);
           return;
         }
       }
 
-      const hit = [...strokes].reverse().find(s => isPointNearStroke(p, s, 10 / zoomScale));
-      if (hit) {
-        if (!selectedElementIds.includes(hit.id)) {
-           setSelectedElementIds([hit.id]); 
+      // Hit Test Strokes
+      const hitStroke = [...strokes].reverse().find(s => isPointNearStroke(p, s, 10 / zoomScale));
+      
+      // Hit Test Text
+      let hitText = null;
+      if (inkCanvasRef.current) {
+         const ctx = inkCanvasRef.current.getContext('2d');
+         if (ctx) {
+            hitText = [...textElements].reverse().find(t => {
+                const b = getTextBounds(t, ctx);
+                // Simple point in rect check
+                return p.x >= b.minX && p.x <= b.maxX && p.y >= b.minY && p.y <= b.maxY;
+            });
+         }
+      }
+
+      if (hitText || hitStroke) {
+        const id = hitText ? hitText.id : hitStroke!.id;
+        if (!selectedElementIds.includes(id)) {
+           // If shift key not pressed, replace selection (simplified: always replace for now unless multiselect logic added)
+           setSelectedElementIds([id]); 
         }
         setInteractionMode('moving');
         setTempStrokes(strokes);
+        setTempTextElements(textElements);
       } else {
         setSelectedElementIds([]);
         setInteractionMode('none');
@@ -366,12 +426,36 @@ const DrawingCanvas = forwardRef<CanvasHandle, DrawingCanvasProps>(({
     else if (currentTool === 'eraser') {
       setInteractionMode('erasing');
       setCurrentStroke([p]);
+      
+      // Erase Strokes
       const hitIndex = strokes.findIndex(s => isPointNearStroke(p, s, strokeSize));
-      if (hitIndex !== -1) {
+      
+      // Erase Text
+      let hitTextId: string | null = null;
+      if (inkCanvasRef.current) {
+         const ctx = inkCanvasRef.current.getContext('2d');
+         if (ctx) {
+            const hitT = textElements.find(t => {
+                const b = getTextBounds(t, ctx);
+                return p.x >= b.minX && p.x <= b.maxX && p.y >= b.minY && p.y <= b.maxY;
+            });
+            if (hitT) hitTextId = hitT.id;
+         }
+      }
+
+      if (hitIndex !== -1 || hitTextId) {
         const newStrokes = [...strokes];
-        newStrokes.splice(hitIndex, 1);
-        setStrokes({ strokes: newStrokes });
+        const newText = [...textElements];
+        
+        if (hitIndex !== -1) newStrokes.splice(hitIndex, 1);
+        if (hitTextId) {
+             const idx = newText.findIndex(t => t.id === hitTextId);
+             if (idx !== -1) newText.splice(idx, 1);
+        }
+
+        setStrokes({ strokes: newStrokes, textElements: newText });
         setTempStrokes(null); 
+        setTempTextElements(null);
       }
     }
     else {
@@ -394,22 +478,47 @@ const DrawingCanvas = forwardRef<CanvasHandle, DrawingCanvasProps>(({
       setCurrentStroke(prev => [...prev, p]);
       // Vector Eraser: delete strokes we touch
       const hitId = strokes.find(s => isPointNearStroke(p, s, strokeSize))?.id;
-      if (hitId) {
-        setStrokes({ strokes: strokes.filter(s => s.id !== hitId) });
+      
+      let hitTextId: string | null = null;
+      if (inkCanvasRef.current) {
+         const ctx = inkCanvasRef.current.getContext('2d');
+         if (ctx) {
+             const hitT = textElements.find(t => {
+                const b = getTextBounds(t, ctx);
+                return p.x >= b.minX && p.x <= b.maxX && p.y >= b.minY && p.y <= b.maxY;
+             });
+             if (hitT) hitTextId = hitT.id;
+         }
+      }
+
+      if (hitId || hitTextId) {
+        setStrokes({ 
+            strokes: hitId ? strokes.filter(s => s.id !== hitId) : strokes,
+            textElements: hitTextId ? textElements.filter(t => t.id !== hitTextId) : textElements
+        });
       }
     }
     else if (interactionMode === 'lassoing') {
       setLassoPolygon(prev => [...prev, p]);
     } 
-    else if (interactionMode === 'moving' && dragStart && tempStrokes) {
+    else if (interactionMode === 'moving' && dragStart && tempStrokes && tempTextElements) {
       const dx = p.x - dragStart.x;
       const dy = p.y - dragStart.y;
-      const moved = strokes.map(s => 
+      
+      const movedStrokes = strokes.map(s => 
         selectedElementIds.includes(s.id) 
           ? { ...s, points: s.points.map(pt => ({ x: pt.x + dx, y: pt.y + dy })), boundingBox: calcBoundingBox(s.points) } 
           : s
       );
-      setTempStrokes(moved);
+
+      const movedText = textElements.map(t => 
+         selectedElementIds.includes(t.id)
+           ? { ...t, x: t.x + dx, y: t.y + dy }
+           : t
+      );
+
+      setTempStrokes(movedStrokes);
+      setTempTextElements(movedText);
     } 
     else if (interactionMode === 'resizing' && activeResizeHandle && resizeSnapshot && selectionRect) {
       const { originalBounds } = resizeSnapshot;
@@ -429,7 +538,10 @@ const DrawingCanvas = forwardRef<CanvasHandle, DrawingCanvasProps>(({
         width: newMaxX - newMinX, height: newMaxY - newMinY
       };
 
-      const resized = strokes.map(s => {
+      const scaleY = newBounds.height / (originalBounds.height || 1);
+
+      // Resize Strokes
+      const resizedStrokes = strokes.map(s => {
         if (selectedElementIds.includes(s.id)) {
            const originalStroke = resizeSnapshot.originalStrokes.find(os => os.id === s.id);
            if (originalStroke) {
@@ -439,7 +551,28 @@ const DrawingCanvas = forwardRef<CanvasHandle, DrawingCanvasProps>(({
         }
         return s;
       });
-      setTempStrokes(resized);
+
+      // Resize Text (Simplified: Scale Font Size and Map Position)
+      const resizedText = textElements.map(t => {
+         if (selectedElementIds.includes(t.id)) {
+            const originalT = resizeSnapshot.originalText.find(ot => ot.id === t.id);
+            if (originalT) {
+                // Map position
+                const nx = (originalT.x - originalBounds.minX) / (originalBounds.width || 1);
+                const ny = (originalT.y - originalBounds.minY) / (originalBounds.height || 1);
+                const newX = newBounds.minX + nx * newBounds.width;
+                const newY = newBounds.minY + ny * newBounds.height;
+                
+                // Map size (use scaleY for font size primarily)
+                const newSize = Math.max(8, originalT.fontSize * scaleY);
+                return { ...t, x: newX, y: newY, fontSize: newSize };
+            }
+         }
+         return t;
+      });
+
+      setTempStrokes(resizedStrokes);
+      setTempTextElements(resizedText);
     }
   };
 
@@ -505,20 +638,37 @@ const DrawingCanvas = forwardRef<CanvasHandle, DrawingCanvasProps>(({
       }
     }
     else if (interactionMode === 'lassoing') {
-      const capturedIds = strokes
+      const capturedStrokeIds = strokes
         .filter(s => s.points.some(p => isPointInPolygon(p, lassoPolygon)))
         .map(s => s.id);
-      setSelectedElementIds(capturedIds);
+        
+      // Capture Text
+      let capturedTextIds: string[] = [];
+      if (inkCanvasRef.current) {
+          const ctx = inkCanvasRef.current.getContext('2d');
+          if (ctx) {
+              capturedTextIds = textElements
+                .filter(t => {
+                    const b = getTextBounds(t, ctx);
+                    // Check center point for simplicity
+                    return isPointInPolygon({x: t.x + b.width/2, y: t.y}, lassoPolygon);
+                })
+                .map(t => t.id);
+          }
+      }
+
+      setSelectedElementIds([...capturedStrokeIds, ...capturedTextIds]);
       setLassoPolygon([]);
     }
-    else if ((interactionMode === 'moving' || interactionMode === 'resizing') && tempStrokes) {
-      setStrokes({ strokes: tempStrokes });
+    else if ((interactionMode === 'moving' || interactionMode === 'resizing') && tempStrokes && tempTextElements) {
+      setStrokes({ strokes: tempStrokes, textElements: tempTextElements });
     }
     
     setInteractionMode('none'); 
     setActiveResizeHandle(null);
     setResizeSnapshot(null);
     setTempStrokes(null);
+    setTempTextElements(null);
     setCurrentStroke([]);
   };
 

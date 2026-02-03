@@ -96,7 +96,7 @@ const App: React.FC = () => {
   const [isSidebarOpen, setIsSidebarOpen] = useState(window.innerWidth > 1024);
   const [isFocusMode, setIsFocusMode] = useState(false);
   const [aiResult, setAiResult] = useState<AIResponse | null>(null);
-  const [autopilotResult, setAutopilotResult] = useState<{ answer: string; x: number; y: number; confidence: number }[] | null>(null);
+  
   const [isSolving, setIsSolving] = useState(false);
   const [isCleaning, setIsCleaning] = useState(false);
   const [isProcessingPDF, setIsProcessingPDF] = useState(false);
@@ -244,7 +244,23 @@ const App: React.FC = () => {
     const dataUrl = canvasRef.current.getCanvasImage(); if (!dataUrl) return;
     try {
       const response = await solveHandwriting(dataUrl, true);
-      setAutopilotResult(response.autopilot || null);
+      if (response.autopilot && Array.isArray(response.autopilot)) {
+        // Convert autopilot answers into persistent TextElements
+        const newTextElements: TextElement[] = response.autopilot.map(item => ({
+          id: `auto-${Date.now()}-${Math.random()}`,
+          text: item.answer,
+          // Convert 1000x1000 AI coordinate space to 850x1100 Logical Canvas
+          x: (item.x / 1000) * 850,
+          y: (item.y / 1000) * 1100,
+          color: '#4f46e5', // Indigo 600
+          fontSize: 32,
+        }));
+        
+        // Add to page state so they are selectable/editable
+        updatePage({ 
+          textElements: [...currentPage.textElements, ...newTextElements] 
+        });
+      }
     } catch (err) { console.error("Autopilot error:", err); }
   };
 
@@ -404,7 +420,7 @@ const App: React.FC = () => {
             minWidth: `${850 * zoomScale}px`,
             maxWidth: `${850 * zoomScale}px`
           }}>
-            {currentPage ? <DrawingCanvas ref={canvasRef} currentTool={currentTool} brushType={toolSettings[currentTool].brushType} color={toolSettings[currentTool].color} strokeSize={toolSettings[currentTool].strokeSize} strokes={currentPage.strokes} textElements={currentPage.textElements} imageElements={currentPage.imageElements || []} autopilotResult={autopilotResult} setStrokes={(data) => updatePage(data)} template={currentPage.template || activeNotebook?.template || 'grid'} zoomScale={zoomScale} smartShapesEnabled={isSmartShapesActive} backgroundUrl={currentPage.backgroundUrl} pdfId={currentPage.pdfId} pdfPageIndex={currentPage.pdfPageIndex} /> : <div className="w-full h-full flex items-center justify-center bg-slate-50"><Sparkles className="text-slate-200" size={64} /></div>}
+            {currentPage ? <DrawingCanvas ref={canvasRef} currentTool={currentTool} brushType={toolSettings[currentTool].brushType} color={toolSettings[currentTool].color} strokeSize={toolSettings[currentTool].strokeSize} strokes={currentPage.strokes} textElements={currentPage.textElements} imageElements={currentPage.imageElements || []} setStrokes={(data) => updatePage(data)} template={currentPage.template || activeNotebook?.template || 'grid'} zoomScale={zoomScale} smartShapesEnabled={isSmartShapesActive} backgroundUrl={currentPage.backgroundUrl} pdfId={currentPage.pdfId} pdfPageIndex={currentPage.pdfPageIndex} /> : <div className="w-full h-full flex items-center justify-center bg-slate-50"><Sparkles className="text-slate-200" size={64} /></div>}
           </div>
           <AIResultPanel result={aiResult} onClose={() => setAiResult(null)} />
         </div>
