@@ -1,7 +1,7 @@
 
 import React, { useRef, useState, useEffect } from 'react';
 import { 
-  Pen, Eraser, Highlighter, Trash2, BrainCircuit, Pointer, Plus, X, Hash, Shapes, LassoSelect, Sparkles, Download, Spline, Squircle, Cloud, Wind
+  Pen, Eraser, Highlighter, Trash2, BrainCircuit, Pointer, Plus, X, Hash, Shapes, LassoSelect, Sparkles, Download, Spline, Squircle, Cloud, Wind, FileText
 } from 'lucide-react';
 import { ToolType, BrushType } from '../types';
 
@@ -14,13 +14,14 @@ interface ToolbarProps {
   onSolve: () => void;
   onCleanDiagram: () => void;
   onExport: () => void;
+  onConvertToText: () => void;
   isSolving: boolean;
   isSmartShapesActive: boolean;
   setIsSmartShapesActive: (val: boolean) => void;
 }
 
 const Toolbar: React.FC<ToolbarProps> = ({ 
-  currentTool, setCurrentTool, toolSettings, updateToolSettings, onClear, onSolve, onCleanDiagram, onExport, isSolving, isSmartShapesActive, setIsSmartShapesActive
+  currentTool, setCurrentTool, toolSettings, updateToolSettings, onClear, onSolve, onCleanDiagram, onExport, onConvertToText, isSolving, isSmartShapesActive, setIsSmartShapesActive
 }) => {
   return (
     <div className="fixed bottom-10 left-1/2 -translate-x-1/2 flex items-center gap-6 z-[100]">
@@ -45,7 +46,16 @@ const Toolbar: React.FC<ToolbarProps> = ({
       </div>
 
       {/* Action Buttons - Matching Screenshot */}
-      <div className="flex items-center gap-4">
+      <div className="flex items-center gap-3">
+        <button 
+          onClick={onConvertToText} 
+          disabled={isSolving}
+          className="h-[56px] w-[56px] flex items-center justify-center rounded-[24px] bg-slate-100 hover:bg-slate-200 text-slate-700 shadow-lg hover:shadow-xl transition-all hover:-translate-y-1 active:scale-95 disabled:opacity-50"
+          title="Convert to Text"
+        >
+          <FileText size={20} />
+        </button>
+
         <button 
           onClick={onCleanDiagram} 
           disabled={isSolving}

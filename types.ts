@@ -107,6 +107,14 @@ export interface DiagramResponse {
   }[];
 }
 
+export interface HandwritingResponse {
+  textBlocks: {
+    text: string;
+    x: number;
+    y: number;
+  }[];
+}
+
 export interface RecognizedShape {
   type: 'line' | 'circle' | 'rectangle' | 'triangle' | 'arrow' | 'ellipse' | 'polygon' | 'none';
   points: Point[];

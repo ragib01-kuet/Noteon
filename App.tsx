@@ -25,7 +25,7 @@ import Dashboard from './components/Dashboard';
 import NewNotebookModal from './components/NewNotebookModal';
 import SettingsModal from './components/SettingsModal';
 import PageThumbnail from './components/PageThumbnail';
-import { solveHandwriting, cleanPhysicsDiagram } from './services/geminiService';
+import { solveHandwriting, cleanPhysicsDiagram, recognizeHandwriting } from './services/geminiService';
 import { loadPDFDocument } from './services/pdfService';
 import { Page, ToolType, BrushType, AIResponse, Notebook, ImageElement, Stroke, TextElement } from './types';
 
@@ -189,7 +189,7 @@ const App: React.FC = () => {
 
   const handleAddPage = (insertIndex: number = -1) => {
     if (!activeNotebookId) return;
-    const newPageId = `${activeNotebookId}-${Date.now()}`;
+    const newPageId = `${activeNotebookId}-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
     const newPage: Page = {
       id: newPageId,
       strokes: [],
@@ -214,18 +214,32 @@ const App: React.FC = () => {
 
   const handleDeletePage = (e: React.MouseEvent, index: number) => {
     e.stopPropagation();
-    if (!activeNotebookId || !activeNotebook || activeNotebook.pages.length <= 1) {
+    e.preventDefault();
+    if (!activeNotebookId || !activeNotebook) return;
+    
+    if (activeNotebook.pages.length <= 1) {
       alert("Notebook must have at least one page.");
       return;
     }
+    
     if (confirm("Are you sure you want to delete this page?")) {
       setNotebooks(prev => prev.map(n => {
         if (n.id !== activeNotebookId) return n;
         const newPages = n.pages.filter((_, i) => i !== index);
         return { ...n, pages: newPages, lastModified: Date.now() };
       }));
-      if (currentPageIndex >= index && currentPageIndex > 0) {
+      
+      // Adjust current page index
+      if (index < currentPageIndex) {
+        // Deleted a page before current, shift left
         setCurrentPageIndex(prev => prev - 1);
+      } else if (index === currentPageIndex) {
+        // Deleted current page
+        if (currentPageIndex === activeNotebook.pages.length - 1) {
+          // If was last page, go to new last page
+          setCurrentPageIndex(Math.max(0, activeNotebook.pages.length - 2));
+        }
+        // Else stay at current index (which is now the next page)
       }
     }
   };
@@ -278,6 +292,39 @@ const App: React.FC = () => {
       const newText: TextElement[] = diagram.labels.map(l => ({ id: `clean-t-${Date.now()}-${Math.random()}`, text: l.text, x: l.x, y: l.y, color: '#4f46e5', fontSize: l.fontSize || 14 }));
       updatePage({ strokes: [...currentPage.strokes.filter(s => s.tool === 'highlighter'), ...newStrokes], textElements: [...currentPage.textElements, ...newText] });
     } catch (err) { console.error("Diagram cleaning error:", err); } finally { setIsCleaning(false); }
+  };
+
+  const handleConvertToText = async () => {
+    if (!canvasRef.current || !currentPage || isSolving) return;
+    const dataUrl = canvasRef.current.getCanvasImage(); if (!dataUrl) return;
+    
+    setIsSolving(true);
+    try {
+      const result = await recognizeHandwriting(dataUrl);
+      
+      const baseW = 850; 
+      const baseH = 1100;
+      
+      const newTextElements: TextElement[] = result.textBlocks.map(block => ({
+        id: `ocr-${Date.now()}-${Math.random()}`,
+        text: block.text,
+        x: (block.x / 1000) * baseW,
+        y: (block.y / 1000) * baseH,
+        color: '#1e293b',
+        fontSize: 24, // Standard size, could be adaptive if AI returned it
+      }));
+      
+      // Replace strokes with text (but keep highlighters/shapes/images)
+      updatePage({
+        strokes: currentPage.strokes.filter(s => s.tool !== 'pen' && s.tool !== 'pencil'),
+        textElements: [...currentPage.textElements, ...newTextElements]
+      });
+    } catch (err) {
+      console.error("Handwriting recognition error:", err);
+      alert("Failed to convert handwriting to text.");
+    } finally {
+      setIsSolving(false);
+    }
   };
 
   const createNotebook = (data: any) => {
@@ -412,7 +459,7 @@ const App: React.FC = () => {
         </header>
         <div className="flex-1 relative overflow-auto custom-scrollbar flex items-start justify-center p-8 md:p-12 lg:p-20 bg-slate-200/50 scroll-smooth">
           {(isAutopilotOn || isSolving || isCleaning) && (
-             <div className="fixed top-24 left-1/2 -translate-x-1/2 z-[100] flex items-center gap-3 bg-white/95 backdrop-blur-xl border border-indigo-100 px-6 py-3 rounded-[24px] shadow-2xl shadow-indigo-200 animate-float"><Loader2 size={16} className="text-indigo-600 animate-spin" /><span className="text-[10px] font-black text-indigo-700 uppercase tracking-widest">{(isSolving ? 'Solving Complexity...' : (isCleaning ? 'Vectorizing Diagram...' : 'Neural Engine Engaged'))}</span></div>
+             <div className="fixed top-24 left-1/2 -translate-x-1/2 z-[100] flex items-center gap-3 bg-white/95 backdrop-blur-xl border border-indigo-100 px-6 py-3 rounded-[24px] shadow-2xl shadow-indigo-200 animate-float"><Loader2 size={16} className="text-indigo-600 animate-spin" /><span className="text-[10px] font-black text-indigo-700 uppercase tracking-widest">{(isSolving ? 'Processing...' : (isCleaning ? 'Vectorizing Diagram...' : 'Neural Engine Engaged'))}</span></div>
           )}
           <div className="relative bg-white shadow-[0_40px_80px_-20px_rgba(0,0,0,0.2)] rounded-sm transition-all duration-300 ease-out mx-auto my-auto" style={{ 
             width: `${850 * zoomScale}px`, 
@@ -424,7 +471,7 @@ const App: React.FC = () => {
           </div>
           <AIResultPanel result={aiResult} onClose={() => setAiResult(null)} />
         </div>
-        <Toolbar currentTool={currentTool} setCurrentTool={setCurrentTool} toolSettings={toolSettings} updateToolSettings={updateToolSettings} onClear={() => canvasRef.current?.clear()} onSolve={handleSolve} onCleanDiagram={handleCleanDiagram} onExport={() => { const link = document.createElement('a'); link.download = `markup-${Date.now()}.png`; link.href = canvasRef.current?.getCanvasImage() || ''; link.click(); }} isSolving={isSolving || isCleaning} isSmartShapesActive={isSmartShapesActive} setIsSmartShapesActive={setIsSmartShapesActive} />
+        <Toolbar currentTool={currentTool} setCurrentTool={setCurrentTool} toolSettings={toolSettings} updateToolSettings={updateToolSettings} onClear={() => canvasRef.current?.clear()} onSolve={handleSolve} onCleanDiagram={handleCleanDiagram} onExport={() => { const link = document.createElement('a'); link.download = `markup-${Date.now()}.png`; link.href = canvasRef.current?.getCanvasImage() || ''; link.click(); }} onConvertToText={handleConvertToText} isSolving={isSolving || isCleaning} isSmartShapesActive={isSmartShapesActive} setIsSmartShapesActive={setIsSmartShapesActive} />
       </main>
     </div>
   );

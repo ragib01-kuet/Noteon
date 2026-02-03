@@ -1,6 +1,6 @@
 
 import { GoogleGenAI, Type } from "@google/genai";
-import { AIResponse, DiagramResponse, SmartShapeResponse, Point } from "../types";
+import { AIResponse, DiagramResponse, SmartShapeResponse, HandwritingResponse, Point } from "../types";
 
 // Safe access to API Key to prevent ReferenceError in browsers
 const getApiKey = () => {
@@ -300,4 +300,52 @@ export const cleanPhysicsDiagram = async (base64Image: string): Promise<DiagramR
     });
     return JSON.parse(response.text?.replace(/```json|```/g, "") || "{}") as DiagramResponse;
   } catch (e) { throw e; }
+};
+
+export const recognizeHandwriting = async (base64Image: string): Promise<HandwritingResponse> => {
+  const apiKey = getApiKey();
+  if (!apiKey) throw new Error("API Key missing");
+  const ai = new GoogleGenAI({ apiKey });
+
+  try {
+    const response = await ai.models.generateContent({
+      model: 'gemini-3-flash-preview',
+      contents: [{
+        parts: [
+          { text: "Transcribe all handwritten text in this image. Group text into logical blocks or lines. Return the text content and the (x, y) center coordinates for each block. The image coordinate system is 1000x1000. Ignore simple lines or drawings that are not text." },
+          { inlineData: { mimeType: "image/png", data: base64Image.split(',')[1] } }
+        ]
+      }],
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            textBlocks: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  text: { type: Type.STRING },
+                  x: { type: Type.NUMBER },
+                  y: { type: Type.NUMBER }
+                },
+                required: ['text', 'x', 'y']
+              }
+            }
+          },
+          required: ['textBlocks']
+        }
+      }
+    });
+    
+    const text = response.text?.replace(/```json|```/g, "").trim();
+    if (!text) throw new Error("Empty AI response");
+    
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    return JSON.parse(jsonMatch ? jsonMatch[0] : text) as HandwritingResponse;
+  } catch (e) {
+    console.error("Handwriting Recognition Failed:", e);
+    throw e;
+  }
 };

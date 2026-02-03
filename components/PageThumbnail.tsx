@@ -115,16 +115,24 @@ const PageThumbnail: React.FC<PageThumbnailProps> = ({ page, pageNumber, isActiv
         Page {pageNumber}
       </div>
 
-      {/* Hover Actions */}
-      <div className="absolute top-2 right-2 flex flex-col gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-        <button onClick={(e) => { e.stopPropagation(); onDelete(e); }} className="p-1.5 bg-white text-red-500 rounded-lg shadow-sm border border-slate-100 hover:bg-red-50">
-          <Trash2 size={12} />
+      {/* Hover Actions - Always visible on active page for better UX */}
+      <div className={`absolute top-2 right-2 flex flex-col gap-1 transition-opacity z-30 ${isActive ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}>
+        <button 
+          onClick={(e) => { 
+            e.preventDefault();
+            e.stopPropagation(); 
+            onDelete(e); 
+          }} 
+          className="p-1.5 bg-white text-red-500 rounded-lg shadow-sm border border-slate-100 hover:bg-red-50 transition-colors"
+          title="Delete Page"
+        >
+          <Trash2 size={14} />
         </button>
       </div>
 
       {/* Add Page Zone (Hover Bottom) */}
-      <div className="absolute -bottom-4 left-0 right-0 h-8 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity z-10 pointer-events-none">
-         <button onClick={(e) => { e.stopPropagation(); onInsertAfter(e); }} className="pointer-events-auto bg-indigo-600 text-white rounded-full p-1 shadow-lg hover:scale-110 transition-transform" title="Insert Page Here">
+      <div className="absolute -bottom-4 left-0 right-0 h-8 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity z-20 pointer-events-none">
+         <button onClick={(e) => { e.preventDefault(); e.stopPropagation(); onInsertAfter(e); }} className="pointer-events-auto bg-indigo-600 text-white rounded-full p-1 shadow-lg hover:scale-110 transition-transform" title="Insert Page Here">
             <Plus size={12} />
          </button>
       </div>
