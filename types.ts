@@ -1,5 +1,6 @@
 
-export type ToolType = 'pen' | 'pencil' | 'highlighter' | 'eraser' | 'select' | 'lasso' | 'image';
+export type ToolType = 'pen' | 'pencil' | 'highlighter' | 'eraser' | 'select' | 'lasso' | 'image' | 'smartShape';
+export type BrushType = 'solid' | 'felt-tip' | 'charcoal' | 'spray-paint';
 
 export interface Point {
   x: number;
@@ -13,6 +14,9 @@ export interface Stroke {
   width: number;
   opacity: number;
   tool: ToolType;
+  brushType?: BrushType;
+  isProcessing?: boolean;
+  isCorrected?: boolean;
   boundingBox: { minX: number; minY: number; maxX: number; maxY: number };
 }
 
@@ -42,6 +46,7 @@ export interface Page {
   textElements: TextElement[];
   imageElements: ImageElement[];
   template: 'blank' | 'ruled' | 'grid';
+  backgroundUrl?: string; 
 }
 
 export interface Notebook {
@@ -82,4 +87,29 @@ export interface AIResponse {
     confidence: number;
   };
   warning?: string;
+}
+
+export interface DiagramResponse {
+  shapes: {
+    points: Point[]; 
+    type: 'line' | 'circle' | 'rectangle' | 'arrow' | 'ellipse' | 'triangle';
+    label?: string;
+  }[];
+  labels: {
+    text: string;
+    x: number; 
+    y: number; 
+    fontSize: number;
+  }[];
+}
+
+export interface RecognizedShape {
+  type: 'line' | 'circle' | 'rectangle' | 'triangle' | 'arrow' | 'ellipse' | 'polygon' | 'none';
+  points: Point[];
+  confidence: number;
+  strokeIndices: number[]; // Indices of the strokes that formed this shape
+}
+
+export interface SmartShapeResponse {
+  shapes: RecognizedShape[];
 }

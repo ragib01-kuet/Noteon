@@ -1,15 +1,22 @@
 
 import React, { useRef, useEffect, useState, useImperativeHandle, forwardRef, useMemo } from 'react';
-import { Stroke, Point, ToolType, TextElement, ImageElement } from '../types';
+import { Stroke, Point, ToolType, BrushType, TextElement, ImageElement } from '../types';
+import { detectShapeGeometric, hitTestResizeHandles, getResizeHandleRects, resizeStrokePoints, getBoundingBox as calcBoundingBox, isPointInPolygon, BoundingBox, ResizeHandleType } from '../services/geometryService';
 
 interface DrawingCanvasProps {
   currentTool: ToolType;
+  brushType: BrushType;
   color: string;
+  strokeSize: number;
   strokes: Stroke[];
   textElements: TextElement[];
   imageElements: ImageElement[];
+  autopilotResult?: { answer: string; x: number; y: number; confidence: number } | null;
+  backgroundUrl?: string;
   setStrokes: (data: { strokes?: Stroke[]; textElements?: TextElement[]; imageElements?: ImageElement[] }) => void;
   template: 'blank' | 'ruled' | 'grid';
+  zoomScale?: number;
+  smartShapesEnabled?: boolean;
 }
 
 export interface CanvasHandle {
@@ -17,411 +24,430 @@ export interface CanvasHandle {
   clear: () => void;
 }
 
-type InteractionMode = 'none' | 'drawing' | 'lassoing' | 'moving' | 'resizing';
-type ResizeHandle = 'nw' | 'ne' | 'sw' | 'se' | null;
+type InteractionMode = 'none' | 'drawing' | 'lassoing' | 'moving' | 'resizing' | 'erasing';
+
+const LOGICAL_WIDTH = 850;
+const LOGICAL_HEIGHT = 1100;
+const SHAPE_DETECTION_DEBOUNCE_MS = 600;
+
+const dist = (p1: Point, p2: Point) => Math.hypot(p1.x - p2.x, p1.y - p2.y);
+
+// Simple stroke hit test
+const isPointNearStroke = (p: Point, s: Stroke, tol: number): boolean => {
+  // Bounding box pre-check for performance
+  if (p.x < s.boundingBox.minX - tol || p.x > s.boundingBox.maxX + tol || 
+      p.y < s.boundingBox.minY - tol || p.y > s.boundingBox.maxY + tol) {
+    return false;
+  }
+
+  for (let i = 0; i < s.points.length - 1; i++) {
+    const p1 = s.points[i], p2 = s.points[i+1], l2 = dist(p1, p2) ** 2;
+    if (l2 === 0) { if (dist(p, p1) < tol) return true; continue; }
+    let t = ((p.x - p1.x) * (p2.x - p1.x) + (p.y - p1.y) * (p2.y - p1.y)) / l2;
+    t = Math.max(0, Math.min(1, t));
+    if (dist(p, { x: p1.x + t * (p2.x - p1.x), y: p1.y + t * (p2.y - p1.y) }) < tol + s.width / 2) return true;
+  }
+  return false;
+};
+
+const drawTexturedPath = (ctx: CanvasRenderingContext2D, points: Point[], color: string, width: number, opacity: number, brush: BrushType) => {
+  if (points.length < 1) return;
+  ctx.save();
+  ctx.globalAlpha = opacity;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = width;
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  if (brush === 'felt-tip') { ctx.lineCap = 'square'; ctx.shadowBlur = width / 4; ctx.shadowColor = color; }
+  ctx.beginPath(); ctx.moveTo(points[0].x, points[0].y);
+  for (let i = 1; i < points.length; i++) ctx.lineTo(points[i].x, points[i].y);
+  ctx.stroke();
+  ctx.restore();
+};
 
 const DrawingCanvas = forwardRef<CanvasHandle, DrawingCanvasProps>(({ 
-  currentTool, 
-  color, 
-  strokes, 
-  textElements,
-  imageElements = [],
-  setStrokes,
-  template 
+  currentTool, brushType, color, strokeSize, strokes, textElements, imageElements, autopilotResult, setStrokes, template, zoomScale = 1.0, smartShapesEnabled = false, backgroundUrl
 }, ref) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const containerRef = useRef<HTMLDivElement>(null);
   
+  // Interaction State
   const [interactionMode, setInteractionMode] = useState<InteractionMode>('none');
-  const [activeResizeHandle, setActiveResizeHandle] = useState<ResizeHandle>(null);
   const [currentStroke, setCurrentStroke] = useState<Point[]>([]);
   const [lassoPolygon, setLassoPolygon] = useState<Point[]>([]);
   const [selectedElementIds, setSelectedElementIds] = useState<string[]>([]);
   const [dragStart, setDragStart] = useState<Point | null>(null);
+  const [backgroundImage, setBackgroundImage] = useState<HTMLImageElement | null>(null);
+  
+  // Local manipulation state (avoids full app re-renders during drag)
+  const [tempStrokes, setTempStrokes] = useState<Stroke[] | null>(null);
 
-  // Cache for loaded images
-  const imageCache = useRef<Map<string, HTMLImageElement>>(new Map());
+  // Resize State
+  const [activeResizeHandle, setActiveResizeHandle] = useState<ResizeHandleType | null>(null);
+  const [resizeSnapshot, setResizeSnapshot] = useState<{
+    originalBounds: BoundingBox;
+    originalStrokes: Stroke[]; 
+  } | null>(null);
+
+  // Smart Shape State
+  const pendingStrokeIdsRef = useRef<Set<string>>(new Set());
+  const shapeDetectionTimeoutRef = useRef<number | null>(null);
+
+  const dpr = window.devicePixelRatio || 1;
 
   useImperativeHandle(ref, () => ({
     getCanvasImage: () => {
       if (!canvasRef.current) return '';
-      const tempCanvas = document.createElement('canvas');
-      tempCanvas.width = canvasRef.current.width;
-      tempCanvas.height = canvasRef.current.height;
-      const tCtx = tempCanvas.getContext('2d');
-      if (tCtx) {
-        tCtx.fillStyle = '#ffffff';
-        tCtx.fillRect(0, 0, tempCanvas.width, tempCanvas.height);
-        tCtx.drawImage(canvasRef.current, 0, 0);
-      }
-      return tempCanvas.toDataURL('image/png');
+      const temp = document.createElement('canvas');
+      temp.width = LOGICAL_WIDTH * dpr; temp.height = LOGICAL_HEIGHT * dpr;
+      const tCtx = temp.getContext('2d');
+      if (tCtx) { tCtx.scale(dpr, dpr); tCtx.fillStyle = '#ffffff'; tCtx.fillRect(0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT); tCtx.drawImage(canvasRef.current, 0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT); }
+      return temp.toDataURL('image/png');
     },
-    clear: () => {
-      setStrokes({ strokes: [], textElements: [], imageElements: [] });
-      setSelectedElementIds([]);
-      setCurrentStroke([]);
-      setLassoPolygon([]);
-    }
+    clear: () => setStrokes({ strokes: [], textElements: [], imageElements: [] })
   }));
 
-  const getBoundingBox = (points: Point[]) => {
-    if (points.length === 0) return { minX: 0, minY: 0, maxX: 0, maxY: 0 };
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    points.forEach(p => {
-      if (p.x < minX) minX = p.x;
-      if (p.y < minY) minY = p.y;
-      if (p.x > maxX) maxX = p.x;
-      if (p.y > maxY) maxY = p.y;
-    });
-    return { minX, minY, maxX, maxY };
-  };
+  useEffect(() => {
+    if (backgroundUrl) {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.src = backgroundUrl;
+      img.onload = () => setBackgroundImage(img);
+    } else {
+      setBackgroundImage(null);
+    }
+  }, [backgroundUrl]);
+
+  // Derived state for rendering: Use tempStrokes if dragging, otherwise props.strokes
+  const activeStrokes = useMemo(() => tempStrokes || strokes, [tempStrokes, strokes]);
 
   const selectionRect = useMemo(() => {
     if (selectedElementIds.length === 0) return null;
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    
-    selectedElementIds.forEach(id => {
-      const stroke = strokes.find(s => s.id === id);
-      if (stroke) {
-        minX = Math.min(minX, stroke.boundingBox.minX);
-        minY = Math.min(minY, stroke.boundingBox.minY);
-        maxX = Math.max(maxX, stroke.boundingBox.maxX);
-        maxY = Math.max(maxY, stroke.boundingBox.maxY);
-      }
-      const te = textElements.find(t => t.id === id);
-      if (te && canvasRef.current) {
-        const tx = (te.x / 100) * canvasRef.current.width;
-        const ty = (te.y / 100) * canvasRef.current.height;
-        const width = te.text.length * (te.fontSize * 0.6);
-        minX = Math.min(minX, tx);
-        minY = Math.min(minY, ty - te.fontSize / 2);
-        maxX = Math.max(maxX, tx + width);
-        maxY = Math.max(maxY, ty + te.fontSize / 2);
-      }
-      const img = imageElements.find(i => i.id === id);
-      if (img && canvasRef.current) {
-        const ix = (img.x / 100) * canvasRef.current.width;
-        const iy = (img.y / 100) * canvasRef.current.height;
-        const iw = (img.width / 100) * canvasRef.current.width;
-        const ih = (img.height / 100) * canvasRef.current.height;
-        minX = Math.min(minX, ix);
-        minY = Math.min(minY, iy);
-        maxX = Math.max(maxX, ix + iw);
-        maxY = Math.max(maxY, iy + ih);
-      }
-    });
+    const selectedPoints = activeStrokes
+      .filter(s => selectedElementIds.includes(s.id))
+      .flatMap(s => s.points);
+    if (selectedPoints.length === 0) return null;
+    return calcBoundingBox(selectedPoints);
+  }, [selectedElementIds, activeStrokes]);
 
-    if (minX === Infinity) return null;
-    return { x: minX - 10, y: minY - 10, w: maxX - minX + 20, h: maxY - minY + 20 };
-  }, [selectedElementIds, strokes, textElements, imageElements]);
-
-  const drawTemplate = (ctx: CanvasRenderingContext2D, width: number, height: number) => {
-    if (template === 'blank') return;
-    ctx.save();
-    if (template === 'ruled') {
-      ctx.strokeStyle = '#e2e8f0';
-      ctx.lineWidth = 1;
-      for (let y = 60; y < height; y += 32) {
-        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke();
-      }
-      ctx.strokeStyle = '#fecaca';
-      ctx.beginPath(); ctx.moveTo(80, 0); ctx.lineTo(80, height); ctx.stroke();
-    } else if (template === 'grid') {
-      ctx.strokeStyle = '#f1f5f9';
-      ctx.lineWidth = 1;
-      const step = 40;
-      for (let x = 0; x < width; x += step) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, height); ctx.stroke(); }
-      for (let y = 0; y < height; y += step) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke(); }
-    }
-    ctx.restore();
-  };
-
-  const render = async () => {
+  // -- Render --
+  const render = () => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    drawTemplate(ctx, canvas.width, canvas.height);
-
-    // Draw Images
-    for (const img of imageElements) {
-      const x = (img.x / 100) * canvas.width;
-      const y = (img.y / 100) * canvas.height;
-      const w = (img.width / 100) * canvas.width;
-      const h = (img.height / 100) * canvas.height;
-
-      let htmlImg = imageCache.current.get(img.dataUrl);
-      if (!htmlImg) {
-        htmlImg = new Image();
-        htmlImg.src = img.dataUrl;
-        imageCache.current.set(img.dataUrl, htmlImg);
-        htmlImg.onload = () => render(); // Re-render when image is loaded
-      }
-
-      if (htmlImg.complete) {
-        ctx.save();
-        if (selectedElementIds.includes(img.id)) {
-          ctx.shadowBlur = 10; ctx.shadowColor = 'rgba(79, 70, 229, 0.4)';
-        }
-        ctx.drawImage(htmlImg, x, y, w, h);
-        ctx.restore();
-      }
+    // CRITICAL: Ensure the canvas internal resolution matches the display
+    if (canvas.width !== LOGICAL_WIDTH * dpr || canvas.height !== LOGICAL_HEIGHT * dpr) {
+      canvas.width = LOGICAL_WIDTH * dpr;
+      canvas.height = LOGICAL_HEIGHT * dpr;
     }
 
-    ctx.lineJoin = 'round';
-    ctx.lineCap = 'round';
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.save(); 
+    ctx.scale(dpr, dpr);
 
-    strokes.forEach(s => {
-      if (!s.points || s.points.length < 2) return;
+    if (backgroundImage) ctx.drawImage(backgroundImage, 0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT);
+    else if (template !== 'blank') {
+      ctx.strokeStyle = template === 'ruled' ? '#e2e8f0' : '#f1f5f9'; ctx.lineWidth = 1;
+      const step = 40;
+      for (let x = 0; x < LOGICAL_WIDTH; x += step) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, LOGICAL_HEIGHT); ctx.stroke(); }
+      for (let y = 0; y < LOGICAL_HEIGHT; y += step) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(LOGICAL_WIDTH, y); ctx.stroke(); }
+    }
+
+    activeStrokes.forEach(s => {
       ctx.save();
-      ctx.beginPath();
-      ctx.globalAlpha = s.opacity;
-      ctx.strokeStyle = s.color;
-      ctx.lineWidth = s.width;
-      
-      if (selectedElementIds.includes(s.id)) {
-        ctx.shadowBlur = 10; ctx.shadowColor = 'rgba(79, 70, 229, 0.4)';
-      }
-
-      ctx.moveTo(s.points[0].x, s.points[0].y);
-      for (let i = 1; i < s.points.length; i++) ctx.lineTo(s.points[i].x, s.points[i].y);
-      ctx.stroke(); ctx.restore();
-    });
-
-    textElements.forEach(te => {
-      ctx.save();
-      ctx.globalAlpha = 1; ctx.fillStyle = te.color; ctx.textBaseline = 'middle';
-      ctx.font = `italic ${te.fontSize}px 'Kalam', cursive`;
-      const x = (te.x / 100) * canvas.width;
-      const y = (te.y / 100) * canvas.height;
-      if (selectedElementIds.includes(te.id)) {
-        ctx.shadowBlur = 10; ctx.shadowColor = 'rgba(79, 70, 229, 0.4)';
-      }
-      ctx.fillText(te.text, x, y); ctx.restore();
+      if (selectedElementIds.includes(s.id)) { ctx.shadowBlur = 4; ctx.shadowColor = 'rgba(79, 70, 229, 0.4)'; }
+      if (s.isCorrected) { ctx.shadowBlur = 8; ctx.shadowColor = s.color + '60'; }
+      drawTexturedPath(ctx, s.points, s.color, s.width, s.opacity, s.brushType || 'solid');
+      ctx.restore();
     });
 
     if (currentStroke.length > 1) {
-      ctx.save(); ctx.beginPath(); ctx.strokeStyle = color; 
-      ctx.lineWidth = currentTool === 'highlighter' ? 25 : 2.5;
-      ctx.globalAlpha = currentTool === 'highlighter' ? 0.3 : 1;
-      ctx.moveTo(currentStroke[0].x, currentStroke[0].y);
-      for (let i = 1; i < currentStroke.length; i++) ctx.lineTo(currentStroke[i].x, currentStroke[i].y);
-      ctx.stroke(); ctx.restore();
+      if (currentTool === 'eraser') {
+        ctx.strokeStyle = '#ef4444'; ctx.lineWidth = 1; ctx.globalAlpha = 0.5;
+        ctx.beginPath(); ctx.arc(currentStroke[currentStroke.length-1].x, currentStroke[currentStroke.length-1].y, strokeSize, 0, Math.PI * 2);
+        ctx.stroke();
+      } else {
+        drawTexturedPath(ctx, currentStroke, color, strokeSize, currentTool === 'highlighter' ? 0.4 : 1.0, brushType);
+      }
+    }
+
+    // Render Selection UI
+    if (selectionRect && currentTool === 'select') {
+      const { minX, minY, width, height } = selectionRect;
+      
+      ctx.strokeStyle = '#4f46e5'; ctx.lineWidth = 1; ctx.setLineDash([4, 4]);
+      ctx.strokeRect(minX - 5, minY - 5, width + 10, height + 10);
+      ctx.setLineDash([]);
+
+      const hs = 8 / zoomScale; 
+      ctx.fillStyle = '#ffffff'; ctx.strokeStyle = '#4f46e5'; ctx.lineWidth = 1.5;
+      const drawSquare = (cx: number, cy: number) => {
+        ctx.fillRect(cx - hs/2, cy - hs/2, hs, hs);
+        ctx.strokeRect(cx - hs/2, cy - hs/2, hs, hs);
+      };
+
+      drawSquare(minX - 5, minY - 5); // NW
+      drawSquare(minX + width + 5, minY - 5); // NE
+      drawSquare(minX - 5, minY + height + 5); // SW
+      drawSquare(minX + width + 5, minY + height + 5); // SE
     }
 
     if (lassoPolygon.length > 1) {
-      ctx.save(); ctx.setLineDash([5, 5]); ctx.strokeStyle = '#4f46e5'; ctx.lineWidth = 1.5; ctx.beginPath();
-      ctx.moveTo(lassoPolygon[0].x, lassoPolygon[0].y);
-      for (let i = 1; i < lassoPolygon.length; i++) ctx.lineTo(lassoPolygon[i].x, lassoPolygon[i].y);
-      ctx.stroke(); ctx.fillStyle = 'rgba(79, 70, 229, 0.05)'; ctx.fill(); ctx.restore();
+      ctx.strokeStyle = '#4f46e5'; ctx.lineWidth = 2; ctx.setLineDash([4, 4]); 
+      ctx.fillStyle = 'rgba(79, 70, 229, 0.1)';
+      ctx.beginPath();
+      ctx.moveTo(lassoPolygon[0].x, lassoPolygon[0].y); 
+      lassoPolygon.forEach(p => ctx.lineTo(p.x, p.y));
+      ctx.stroke(); 
+      ctx.fill();
     }
-
-    if (selectionRect) {
-      ctx.save();
-      ctx.strokeStyle = '#4f46e5'; ctx.lineWidth = 1; ctx.setLineDash([4, 4]);
-      ctx.strokeRect(selectionRect.x, selectionRect.y, selectionRect.w, selectionRect.h);
-      
-      // Draw resize handles if at least one image is selected and ONLY images are selected for simplicity of resize logic
-      const onlyImagesSelected = selectedElementIds.every(id => imageElements.some(img => img.id === id));
-      if (onlyImagesSelected && selectedElementIds.length > 0) {
-        ctx.setLineDash([]);
-        ctx.fillStyle = '#4f46e5';
-        const handleSize = 8;
-        // Corners
-        ctx.fillRect(selectionRect.x - handleSize/2, selectionRect.y - handleSize/2, handleSize, handleSize); // nw
-        ctx.fillRect(selectionRect.x + selectionRect.w - handleSize/2, selectionRect.y - handleSize/2, handleSize, handleSize); // ne
-        ctx.fillRect(selectionRect.x - handleSize/2, selectionRect.y + selectionRect.h - handleSize/2, handleSize, handleSize); // sw
-        ctx.fillRect(selectionRect.x + selectionRect.w - handleSize/2, selectionRect.y + selectionRect.h - handleSize/2, handleSize, handleSize); // se
-      }
-      ctx.restore();
-    }
+    ctx.restore();
   };
 
-  useEffect(() => {
-    const observer = new ResizeObserver((entries) => {
-      const entry = entries[0];
-      if (entry && canvasRef.current) {
-        const { width, height } = entry.contentRect;
-        if (width > 0 && height > 0) {
-          canvasRef.current.width = width;
-          canvasRef.current.height = height;
-          render();
-        }
-      }
-    });
+  useEffect(() => { render(); }, [activeStrokes, currentStroke, lassoPolygon, selectedElementIds, template, activeResizeHandle, backgroundImage]);
 
-    if (containerRef.current) observer.observe(containerRef.current);
-    return () => observer.disconnect();
-  }, []);
+  // -- Event Logic --
 
-  useEffect(() => {
-    render();
-  }, [strokes, textElements, imageElements, template, currentStroke, lassoPolygon, selectedElementIds, selectionRect]);
-
-  const getCoords = (e: React.MouseEvent | React.TouchEvent): Point => {
+  const getCoords = (e: React.PointerEvent) => {
     const rect = canvasRef.current!.getBoundingClientRect();
-    const cx = 'touches' in e ? (e as React.TouchEvent).touches[0].clientX : (e as React.MouseEvent).clientX;
-    const cy = 'touches' in e ? (e as React.TouchEvent).touches[0].clientY : (e as React.MouseEvent).clientY;
-    return { x: cx - rect.left, y: cy - rect.top };
+    return { 
+      x: (e.clientX - rect.left) * (LOGICAL_WIDTH / rect.width), 
+      y: (e.clientY - rect.top) * (LOGICAL_HEIGHT / rect.height) 
+    };
   };
 
-  const handlePointerDown = (e: React.MouseEvent | React.TouchEvent) => {
+  const updateCursor = (p: Point) => {
+    if (currentTool === 'select' && selectionRect) {
+      const handle = hitTestResizeHandles(p, selectionRect, zoomScale);
+      if (handle === 'nw' || handle === 'se') canvasRef.current!.style.cursor = 'nwse-resize';
+      else if (handle === 'ne' || handle === 'sw') canvasRef.current!.style.cursor = 'nesw-resize';
+      else if (
+         p.x >= selectionRect.minX && p.x <= selectionRect.maxX && 
+         p.y >= selectionRect.minY && p.y <= selectionRect.maxY
+      ) {
+        canvasRef.current!.style.cursor = 'move';
+      } else {
+        canvasRef.current!.style.cursor = 'default';
+      }
+    } else if (currentTool === 'lasso') {
+      canvasRef.current!.style.cursor = 'crosshair';
+    } else {
+      canvasRef.current!.style.cursor = 'crosshair';
+    }
+  };
+
+  const onDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    e.currentTarget.setPointerCapture(e.pointerId);
+    
+    if (shapeDetectionTimeoutRef.current) {
+      window.clearTimeout(shapeDetectionTimeoutRef.current);
+      shapeDetectionTimeoutRef.current = null;
+    }
+
     const p = getCoords(e);
     setDragStart(p);
 
-    if (selectionRect) {
-      const handleSize = 15;
-      const { x, y, w, h } = selectionRect;
-      
-      // Check for resize handles
-      if (selectedElementIds.every(id => imageElements.some(img => img.id === id))) {
-        if (Math.hypot(p.x - x, p.y - y) < handleSize) { setInteractionMode('resizing'); setActiveResizeHandle('nw'); return; }
-        if (Math.hypot(p.x - (x+w), p.y - y) < handleSize) { setInteractionMode('resizing'); setActiveResizeHandle('ne'); return; }
-        if (Math.hypot(p.x - x, p.y - (y+h)) < handleSize) { setInteractionMode('resizing'); setActiveResizeHandle('sw'); return; }
-        if (Math.hypot(p.x - (x+w), p.y - (y+h)) < handleSize) { setInteractionMode('resizing'); setActiveResizeHandle('se'); return; }
-      }
-
-      // Check for move
-      if (p.x >= x && p.x <= x + w && p.y >= y && p.y <= y + h) { 
-        setInteractionMode('moving'); 
-        return; 
-      }
-    }
-
-    if (currentTool === 'eraser') {
-      setInteractionMode('drawing');
-    } else if (currentTool === 'lasso' || currentTool === 'select') {
-      setInteractionMode('lassoing'); setLassoPolygon([p]); setSelectedElementIds([]);
-    } else {
-      setInteractionMode('drawing'); setCurrentStroke([p]); setSelectedElementIds([]);
-    }
-  };
-
-  const handlePointerMove = (e: React.MouseEvent | React.TouchEvent) => {
-    if (interactionMode === 'none') return;
-    const p = getCoords(e);
-    const canvas = canvasRef.current!;
-    const dx = p.x - (dragStart?.x || p.x);
-    const dy = p.y - (dragStart?.y || p.y);
-
-    if (interactionMode === 'moving' && selectionRect) {
-      const updatedStrokes = strokes.map(s => {
-        if (!selectedElementIds.includes(s.id)) return s;
-        const nP = s.points.map(pt => ({ x: pt.x + dx, y: pt.y + dy }));
-        return { ...s, points: nP, boundingBox: getBoundingBox(nP) };
-      });
-      const updatedText = textElements.map(te => {
-        if (!selectedElementIds.includes(te.id)) return te;
-        return { ...te, x: te.x + (dx / canvas.width) * 100, y: te.y + (dy / canvas.height) * 100 };
-      });
-      const updatedImages = imageElements.map(img => {
-        if (!selectedElementIds.includes(img.id)) return img;
-        return { ...img, x: img.x + (dx / canvas.width) * 100, y: img.y + (dy / canvas.height) * 100 };
-      });
-      setStrokes({ strokes: updatedStrokes, textElements: updatedText, imageElements: updatedImages });
-      setDragStart(p);
-    } else if (interactionMode === 'resizing' && activeResizeHandle) {
-      const updatedImages = imageElements.map(img => {
-        if (!selectedElementIds.includes(img.id)) return img;
-        
-        let newX = img.x;
-        let newY = img.y;
-        let newW = img.width;
-        let newH = img.height;
-
-        const pdx = (dx / canvas.width) * 100;
-        const pdy = (dy / canvas.height) * 100;
-
-        switch (activeResizeHandle) {
-          case 'nw': newX += pdx; newY += pdy; newW -= pdx; newH -= pdy; break;
-          case 'ne': newY += pdy; newW += pdx; newH -= pdy; break;
-          case 'sw': newX += pdx; newW -= pdx; newH += pdy; break;
-          case 'se': newW += pdx; newH += pdy; break;
+    if (currentTool === 'select') {
+      if (selectionRect) {
+        const handle = hitTestResizeHandles(p, selectionRect, zoomScale);
+        if (handle) {
+          setInteractionMode('resizing');
+          setActiveResizeHandle(handle);
+          setResizeSnapshot({
+            originalBounds: { ...selectionRect },
+            originalStrokes: strokes.filter(s => selectedElementIds.includes(s.id))
+          });
+          setTempStrokes(strokes); 
+          return;
         }
+      }
 
-        // Constraints
-        if (newW < 2) newW = 2;
-        if (newH < 2) newH = 2;
-
-        return { ...img, x: newX, y: newY, width: newW, height: newH };
-      });
-      setStrokes({ imageElements: updatedImages });
-      setDragStart(p);
-    } else if (interactionMode === 'drawing') {
-      if (currentTool === 'eraser') {
-        const remainingStrokes = strokes.filter(s => {
-          const inBox = p.x >= s.boundingBox.minX - 15 && p.x <= s.boundingBox.maxX + 15 && p.y >= s.boundingBox.minY - 15 && p.y <= s.boundingBox.maxY + 15;
-          if (!inBox) return true;
-          return !s.points.some(pt => Math.hypot(pt.x - p.x, pt.y - p.y) < 20);
-        });
-        const remainingText = textElements.filter(te => {
-          const tx = (te.x / 100) * canvas.width, ty = (te.y / 100) * canvas.height;
-          return !(p.x >= tx && p.x <= tx + (te.text.length * te.fontSize * 0.6) && p.y >= ty - 15 && p.y <= ty + 15);
-        });
-        const remainingImages = imageElements.filter(img => {
-          const ix = (img.x / 100) * canvas.width;
-          const iy = (img.y / 100) * canvas.height;
-          const iw = (img.width / 100) * canvas.width;
-          const ih = (img.height / 100) * canvas.height;
-          return !(p.x >= ix && p.x <= ix + iw && p.y >= iy && p.y <= iy + ih);
-        });
-        setStrokes({ strokes: remainingStrokes, textElements: remainingText, imageElements: remainingImages });
+      const hit = [...strokes].reverse().find(s => isPointNearStroke(p, s, 10 / zoomScale));
+      if (hit) {
+        if (!selectedElementIds.includes(hit.id)) {
+           setSelectedElementIds([hit.id]); 
+        }
+        setInteractionMode('moving');
+        setTempStrokes(strokes);
       } else {
-        setCurrentStroke(prev => [...prev, p]);
+        setSelectedElementIds([]);
+        setInteractionMode('none');
       }
-    } else if (interactionMode === 'lassoing') {
+    } 
+    else if (currentTool === 'lasso') {
+      setInteractionMode('lassoing');
+      setLassoPolygon([p]);
+      setSelectedElementIds([]); 
+    }
+    else if (currentTool === 'eraser') {
+      setInteractionMode('erasing');
+      setCurrentStroke([p]);
+      const hitIndex = strokes.findIndex(s => isPointNearStroke(p, s, strokeSize));
+      if (hitIndex !== -1) {
+        const newStrokes = [...strokes];
+        newStrokes.splice(hitIndex, 1);
+        setStrokes({ strokes: newStrokes });
+        setTempStrokes(null); 
+      }
+    }
+    else {
+      setInteractionMode('drawing');
+      setCurrentStroke([p]);
+      setSelectedElementIds([]);
+    }
+  };
+
+  const onMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const p = getCoords(e);
+    updateCursor(p);
+
+    if (interactionMode === 'none') return;
+
+    if (interactionMode === 'drawing') {
+      setCurrentStroke(prev => [...prev, p]);
+    } 
+    else if (interactionMode === 'erasing') {
+      setCurrentStroke(prev => [...prev, p]);
+      // Vector Eraser: delete strokes we touch
+      const hitId = strokes.find(s => isPointNearStroke(p, s, strokeSize))?.id;
+      if (hitId) {
+        setStrokes({ strokes: strokes.filter(s => s.id !== hitId) });
+      }
+    }
+    else if (interactionMode === 'lassoing') {
       setLassoPolygon(prev => [...prev, p]);
-    }
-  };
+    } 
+    else if (interactionMode === 'moving' && dragStart && tempStrokes) {
+      const dx = p.x - dragStart.x;
+      const dy = p.y - dragStart.y;
+      const moved = strokes.map(s => 
+        selectedElementIds.includes(s.id) 
+          ? { ...s, points: s.points.map(pt => ({ x: pt.x + dx, y: pt.y + dy })), boundingBox: calcBoundingBox(s.points) } 
+          : s
+      );
+      setTempStrokes(moved);
+    } 
+    else if (interactionMode === 'resizing' && activeResizeHandle && resizeSnapshot && selectionRect) {
+      const { originalBounds } = resizeSnapshot;
+      let newMinX = originalBounds.minX, newMinY = originalBounds.minY;
+      let newMaxX = originalBounds.maxX, newMaxY = originalBounds.maxY;
 
-  const handlePointerUp = () => {
-    if (interactionMode === 'lassoing' && lassoPolygon.length > 3) {
-      const sIds: string[] = [];
-      const isInside = (point: Point, vs: Point[]) => {
-        let x = point.x, y = point.y, inside = false;
-        for (let i = 0, j = vs.length - 1; i < vs.length; j = i++) {
-          let xi = vs[i].x, yi = vs[i].y, xj = vs[j].x, yj = vs[j].y;
-          if (((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi)) inside = !inside;
-        }
-        return inside;
+      if (activeResizeHandle.includes('w')) newMinX = p.x;
+      if (activeResizeHandle.includes('e')) newMaxX = p.x;
+      if (activeResizeHandle.includes('n')) newMinY = p.y;
+      if (activeResizeHandle.includes('s')) newMaxY = p.y;
+
+      if (newMaxX - newMinX < 5) newMaxX = newMinX + 5;
+      if (newMaxY - newMinY < 5) newMaxY = newMinY + 5;
+
+      const newBounds: BoundingBox = {
+        minX: newMinX, minY: newMinY, maxX: newMaxX, maxY: newMaxY,
+        width: newMaxX - newMinX, height: newMaxY - newMinY
       };
-      strokes.forEach(s => { if (s.points.some(pt => isInside(pt, lassoPolygon))) sIds.push(s.id); });
-      textElements.forEach(te => {
-        const x = (te.x / 100) * canvasRef.current!.width, y = (te.y / 100) * canvasRef.current!.height;
-        if (isInside({ x, y }, lassoPolygon)) sIds.push(te.id);
-      });
-      imageElements.forEach(img => {
-        const x = (img.x / 100) * canvasRef.current!.width, y = (img.y / 100) * canvasRef.current!.height;
-        const w = (img.width / 100) * canvasRef.current!.width, h = (img.height / 100) * canvasRef.current!.height;
-        // Check corners of image
-        if (isInside({x,y}, lassoPolygon) || isInside({x:x+w, y}, lassoPolygon) || isInside({x, y:y+h}, lassoPolygon) || isInside({x:x+w, y:y+h}, lassoPolygon)) {
-          sIds.push(img.id);
+
+      const resized = strokes.map(s => {
+        if (selectedElementIds.includes(s.id)) {
+           const originalStroke = resizeSnapshot.originalStrokes.find(os => os.id === s.id);
+           if (originalStroke) {
+             const newPoints = resizeStrokePoints(originalStroke.points, originalBounds, newBounds);
+             return { ...s, points: newPoints, boundingBox: calcBoundingBox(newPoints) };
+           }
         }
+        return s;
       });
-      setSelectedElementIds(sIds);
-      setLassoPolygon([]);
-    } else if (interactionMode === 'drawing' && currentStroke.length > 1) {
-      setStrokes({ strokes: [...strokes, { id: Date.now().toString(), points: currentStroke, color, width: currentTool === 'highlighter' ? 25 : 2.5, opacity: currentTool === 'highlighter' ? 0.3 : 1, tool: currentTool, boundingBox: getBoundingBox(currentStroke) }] });
-      setCurrentStroke([]);
+      setTempStrokes(resized);
     }
-    setInteractionMode('none'); 
-    setDragStart(null);
-    setActiveResizeHandle(null);
   };
 
-  return (
-    <div ref={containerRef} className="w-full h-full relative">
-      <canvas
-        ref={canvasRef}
-        className="block w-full h-full touch-none cursor-crosshair bg-transparent"
-        onMouseDown={handlePointerDown} onMouseMove={handlePointerMove} onMouseUp={handlePointerUp}
-        onTouchStart={handlePointerDown} onTouchMove={handlePointerMove} onTouchEnd={handlePointerUp}
-      />
-    </div>
-  );
+  const onUp = async (e: React.PointerEvent<HTMLCanvasElement>) => {
+    e.currentTarget.releasePointerCapture(e.pointerId);
+
+    if (interactionMode === 'drawing' && currentStroke.length > 1) {
+      const id = Date.now().toString();
+      const s: Stroke = { 
+        id, 
+        points: currentStroke, 
+        color, 
+        width: strokeSize, 
+        opacity: currentTool === 'highlighter' ? 0.4 : 1, 
+        tool: currentTool, 
+        brushType, 
+        isProcessing: false, 
+        boundingBox: calcBoundingBox(currentStroke) 
+      };
+      
+      const newStrokesList = [...strokes, s];
+      setStrokes({ strokes: newStrokesList });
+      setCurrentStroke([]);
+
+      if (smartShapesEnabled && (currentTool === 'pen' || currentTool === 'pencil')) {
+        pendingStrokeIdsRef.current.add(id);
+        if (shapeDetectionTimeoutRef.current) window.clearTimeout(shapeDetectionTimeoutRef.current);
+        shapeDetectionTimeoutRef.current = window.setTimeout(() => {
+          const idsToProcess = Array.from(pendingStrokeIdsRef.current);
+          if (idsToProcess.length === 0) return;
+          pendingStrokeIdsRef.current.clear();
+
+          const groupStrokes = idsToProcess.map(sid => newStrokesList.find(st => st.id === sid)).filter(Boolean) as Stroke[];
+          if (groupStrokes.length > 0) {
+            const res = detectShapeGeometric(groupStrokes.map(st => st.points));
+            if (res.shapes.length > 0) {
+               let idsToRemove: string[] = [];
+               let newStrokesToAdd: Stroke[] = [];
+               res.shapes.forEach(shape => {
+                  if (shape.strokeIndices.length > 0) {
+                    const sourceIds = shape.strokeIndices.map(i => groupStrokes[i].id);
+                    idsToRemove.push(...sourceIds);
+                    const primary = groupStrokes[shape.strokeIndices[0]];
+                    newStrokesToAdd.push({
+                      id: `shape-${Date.now()}-${Math.random()}`,
+                      points: shape.points,
+                      color: primary.color,
+                      width: primary.width,
+                      opacity: primary.opacity,
+                      tool: primary.tool,
+                      brushType: primary.brushType,
+                      isCorrected: true,
+                      boundingBox: calcBoundingBox(shape.points)
+                    });
+                  }
+               });
+               if (newStrokesToAdd.length > 0) {
+                 setStrokes({ strokes: [...newStrokesList.filter(st => !idsToRemove.includes(st.id)), ...newStrokesToAdd] });
+               }
+            }
+          }
+        }, SHAPE_DETECTION_DEBOUNCE_MS);
+      }
+    }
+    else if (interactionMode === 'lassoing') {
+      const capturedIds = strokes
+        .filter(s => s.points.some(p => isPointInPolygon(p, lassoPolygon)))
+        .map(s => s.id);
+      setSelectedElementIds(capturedIds);
+      setLassoPolygon([]);
+    }
+    else if ((interactionMode === 'moving' || interactionMode === 'resizing') && tempStrokes) {
+      setStrokes({ strokes: tempStrokes });
+    }
+    
+    setInteractionMode('none'); 
+    setActiveResizeHandle(null);
+    setResizeSnapshot(null);
+    setTempStrokes(null);
+    setCurrentStroke([]);
+  };
+
+  return <canvas 
+    ref={canvasRef} 
+    className="w-full h-full block touch-none"
+    style={{ touchAction: 'none' }}
+    onPointerDown={onDown} 
+    onPointerMove={onMove} 
+    onPointerUp={onUp} 
+    onPointerLeave={onUp}
+  />;
 });
 
-DrawingCanvas.displayName = 'DrawingCanvas';
 export default DrawingCanvas;

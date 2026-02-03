@@ -1,15 +1,29 @@
 
-import React from 'react';
-import { Plus, Book, Clock, Star, MoreVertical, Search, Zap, LayoutGrid, List } from 'lucide-react';
+import React, { useRef } from 'react';
+import { Plus, Book, Clock, Star, MoreVertical, Search, Zap, LayoutGrid, List, FileUp } from 'lucide-react';
 import { Notebook } from '../types';
 
 interface DashboardProps {
   notebooks: Notebook[];
   onSelectNotebook: (id: string) => void;
   onCreateClick: () => void;
+  onImportPDF?: (file: File) => void;
 }
 
-const Dashboard: React.FC<DashboardProps> = ({ notebooks, onSelectNotebook, onCreateClick }) => {
+const Dashboard: React.FC<DashboardProps> = ({ notebooks = [], onSelectNotebook, onCreateClick, onImportPDF }) => {
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file && onImportPDF) {
+      onImportPDF(file);
+    }
+    // Reset input
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
+  };
+
   return (
     <div className="flex-1 bg-[#f8fafc] overflow-y-auto custom-scrollbar p-6 md:p-12 relative">
       <div className="max-w-7xl mx-auto">
@@ -34,6 +48,23 @@ const Dashboard: React.FC<DashboardProps> = ({ notebooks, onSelectNotebook, onCr
                 className="w-72 bg-white border border-slate-200 rounded-2xl py-3.5 pl-12 pr-4 text-sm outline-none focus:ring-4 focus:ring-indigo-500/10 focus:border-indigo-500 transition-all shadow-sm font-medium"
               />
             </div>
+            
+            <input 
+              type="file" 
+              accept="application/pdf" 
+              ref={fileInputRef} 
+              className="hidden" 
+              onChange={handleFileChange} 
+            />
+            
+            <button 
+              onClick={() => fileInputRef.current?.click()}
+              className="flex items-center gap-2.5 px-6 py-3.5 md:py-4 bg-white hover:bg-slate-50 text-slate-700 border border-slate-200 rounded-[22px] font-bold transition-all shadow-sm active:scale-95"
+            >
+              <FileUp size={20} />
+              <span>Import PDF</span>
+            </button>
+
             <button 
               onClick={onCreateClick}
               className="flex items-center gap-2.5 px-6 md:px-8 py-3.5 md:py-4 bg-indigo-600 hover:bg-indigo-700 text-white rounded-[22px] font-bold transition-all shadow-2xl shadow-indigo-200 active:scale-95 group overflow-hidden relative"
@@ -86,27 +117,27 @@ const Dashboard: React.FC<DashboardProps> = ({ notebooks, onSelectNotebook, onCr
                   <div className="relative aspect-[3/4] bg-white rounded-[36px] shadow-sm border border-slate-200 overflow-hidden transition-all duration-500 group-hover:-translate-y-4 group-hover:shadow-[0_40px_80px_-20px_rgba(79,70,229,0.15)] group-hover:border-indigo-100">
                     <div className="absolute left-0 top-0 bottom-0 w-8 bg-black/[0.03] z-10 border-r border-black/[0.05]"></div>
                     <div className="absolute left-2 top-0 bottom-0 w-[2px] bg-black/[0.02] z-10"></div>
-                    <div className="absolute top-0 right-0 left-0 h-40 opacity-10 blur-3xl transform -rotate-12 translate-y-[-20%]" style={{ backgroundColor: notebook.coverColor }}></div>
+                    <div className="absolute top-0 right-0 left-0 h-40 opacity-10 blur-3xl transform -rotate-12 translate-y-[-20%]" style={{ backgroundColor: notebook.coverColor || '#4f46e5' }}></div>
                     
                     <div className="p-8 md:p-10 pt-12 md:pt-14 flex flex-col h-full relative z-20">
-                      <div className="w-12 h-12 md:w-14 md:h-14 rounded-2xl mb-6 md:mb-8 flex items-center justify-center text-white shadow-2xl transition-transform group-hover:rotate-12" style={{ backgroundColor: notebook.coverColor }}>
+                      <div className="w-12 h-12 md:w-14 md:h-14 rounded-2xl mb-6 md:mb-8 flex items-center justify-center text-white shadow-2xl transition-transform group-hover:rotate-12" style={{ backgroundColor: notebook.coverColor || '#4f46e5' }}>
                         <Book size={24} />
                       </div>
                       
                       <h3 className="text-xl md:text-2xl font-black text-slate-900 leading-[1.1] mb-3 group-hover:text-indigo-600 transition-colors truncate">
-                        {notebook.title}
+                        {notebook.title || 'Untitled'}
                       </h3>
                       <div className="flex items-center gap-2 mb-4 md:mb-6">
                         <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest bg-slate-50 px-2 py-0.5 rounded-full border border-slate-100">
-                          {notebook.pages.length} Pages
+                          {(notebook.pages || []).length} Pages
                         </span>
                         <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest bg-slate-50 px-2 py-0.5 rounded-full border border-slate-100">
-                          {notebook.template}
+                          {notebook.template || 'grid'}
                         </span>
                       </div>
                       
                       <div className="mt-auto flex flex-wrap gap-2">
-                        {notebook.tags.map(tag => (
+                        {(notebook.tags || []).map(tag => (
                           <span key={tag} className="px-3 py-1 bg-slate-100 text-[9px] font-black text-slate-500 rounded-lg uppercase tracking-wider group-hover:bg-indigo-50 group-hover:text-indigo-600 transition-colors">#{tag}</span>
                         ))}
                       </div>
@@ -114,7 +145,7 @@ const Dashboard: React.FC<DashboardProps> = ({ notebooks, onSelectNotebook, onCr
                   </div>
                   
                   <div className="mt-4 px-4 flex items-center justify-between opacity-0 group-hover:opacity-100 transition-all translate-y-2 group-hover:translate-y-0">
-                    <span className="text-[9px] font-bold text-slate-400 uppercase">Last Edit: {new Date(notebook.lastModified).toLocaleDateString()}</span>
+                    <span className="text-[9px] font-bold text-slate-400 uppercase">Last Edit: {notebook.lastModified ? new Date(notebook.lastModified).toLocaleDateString() : 'N/A'}</span>
                     <MoreVertical size={14} className="text-slate-400" />
                   </div>
                 </div>
